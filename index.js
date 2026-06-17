@@ -111,28 +111,89 @@ ${question}
 Answer with brief citations like [1], [2] that refer to the context above.`;
 }
 
-async function callOllama(prompt) {
-  const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      prompt,
-      stream: false,
-      options: {
-        temperature: 0.2,
-        num_predict: 700
-      }
-    })
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Ollama request failed (${response.status}): ${body}`);
+function buildFallbackAnswer(contextChunks) {
+  if (!contextChunks.length) {
+    return "I could not get a model answer, and I did not find relevant local sources. Please add more knowledge-base documents or rephrase the question.";
   }
 
-  const data = await response.json();
-  return data.response || "";
+  const sourceList = contextChunks
+    .map((chunk, index) => `[${index + 1}] ${chunk.title} (${chunk.source})\n${chunk.content}`)
+    .join("\n\n");
+
+  return `I could not get a generated model answer, but I found relevant local source material. Please review these sources:\n\n${sourceList}`;
+}
+
+function extractOllamaText(data) {
+  return (data.message?.content || data.response || "").trim();
+}
+
+async function postToOllama(pathname, body) {
+  let response;
+
+  try {
+    response = await fetch(`${OLLAMA_BASE_URL}${pathname}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach Ollama at ${OLLAMA_BASE_URL}${pathname}. ` +
+      `If this is deployed on Render, localhost means the Render server, not your computer. ` +
+      `Set OLLAMA_BASE_URL to a public Ollama-compatible server URL or run Ollama inside the deployed service. ` +
+      `Original error: ${error.message}`
+    );
+  }
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+    if (response.status === 404 && responseBody.toLowerCase().includes("model")) {
+      throw new Error(
+        `Ollama model '${OLLAMA_MODEL}' was not found. ` +
+        `Run 'ollama pull ${OLLAMA_MODEL}' on the same machine/server that is running Ollama. ` +
+        `Original response: ${responseBody}`
+      );
+    }
+    throw new Error(`Ollama request failed (${response.status}): ${responseBody}`);
+  }
+
+  return response.json();
+}
+
+async function callOllama(prompt) {
+  const chatData = await postToOllama("/api/chat", {
+    model: OLLAMA_MODEL,
+    messages: [{
+      role: "user", content: `${prompt}
+
+/no_think
+
+Write the final answer now. Do not return an empty response.` }],
+    stream: false,
+    options: {
+      temperature: 0.2,
+      num_predict: 700
+    }
+  });
+
+  const chatText = extractOllamaText(chatData);
+  if (chatText) return chatText;
+
+  const generateData = await postToOllama("/api/generate", {
+    model: OLLAMA_MODEL,
+    prompt: `${prompt}
+
+/no_think
+
+Write the final answer now. Do not return an empty response.`,
+    stream: false,
+    options: {
+      temperature: 0.2,
+      num_predict: 700
+    }
+  });
+
+  return extractOllamaText(generateData);
 }
 
 app.get("/health", async (req, res) => {
@@ -151,17 +212,24 @@ app.post("/chat", async (req, res) => {
     const chunks = await getChunks();
     const sources = retrieveRelevantChunks(question, chunks);
     const prompt = buildPrompt(question, sources);
-    const answer = await callOllama(prompt);
+    const generatedAnswer = (await callOllama(prompt)).trim();
+    const answer = generatedAnswer || buildFallbackAnswer(sources);
 
     res.json({
       answer,
       model: OLLAMA_MODEL,
-      sources: sources.map(({ id, source, title, score }) => ({ id, source, title, score }))
+      sources: sources.map(({ id, source, title, score, content }) => ({
+        id,
+        source,
+        title,
+        score,
+        excerpt: content.length > 700 ? `${content.slice(0, 700)}...` : content
+      }))
     });
   } catch (error) {
-    res.status(502).json({
+    res.status(503).json({
       error: error.message,
-      hint: `Make sure Ollama is reachable at ${OLLAMA_BASE_URL} and the model '${OLLAMA_MODEL}' is pulled.`
+      hint: `Make sure Ollama is reachable at ${OLLAMA_BASE_URL} and the model '${OLLAMA_MODEL}' is pulled. If this app is on Render, set OLLAMA_BASE_URL to an external HTTPS model endpoint or deploy Ollama with the app.`
     });
   }
 });

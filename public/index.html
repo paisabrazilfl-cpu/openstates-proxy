@@ -1,70 +1,171 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Dawah Chatbot</title>
-    <style>
-      :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      body { margin: 0; background: #f6f7f3; color: #172018; }
-      main { max-width: 900px; margin: 0 auto; padding: 32px 18px; }
-      .card { background: white; border: 1px solid #dfe6dc; border-radius: 18px; padding: 24px; box-shadow: 0 12px 28px rgba(23, 32, 24, 0.08); }
-      h1 { margin-top: 0; color: #0f5132; }
-      textarea { width: 100%; box-sizing: border-box; min-height: 110px; padding: 14px; border-radius: 12px; border: 1px solid #b9c8b6; font: inherit; }
-      button { margin-top: 12px; border: 0; border-radius: 999px; padding: 12px 20px; background: #0f5132; color: white; font-weight: 700; cursor: pointer; }
-      button:disabled { opacity: 0.6; cursor: wait; }
-      pre { white-space: pre-wrap; background: #f1f5ef; border-radius: 12px; padding: 16px; line-height: 1.5; }
-      .sources { margin-top: 16px; font-size: 0.95rem; }
-      .source { padding: 10px; border-left: 4px solid #0f5132; background: #f8faf7; margin: 8px 0; }
-      .muted { color: #5d695d; }
-      @media (prefers-color-scheme: dark) {
-        body { background: #101610; color: #edf4ea; }
-        .card { background: #172018; border-color: #2c3b2d; }
-        textarea, pre, .source { background: #101610; color: #edf4ea; border-color: #3c4d3d; }
-        .muted { color: #b8c7b5; }
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <section class="card">
-        <h1>AI Dawah Chatbot</h1>
-        <p class="muted">Ask a question about Islam. This MVP retrieves from local Markdown sources and asks an open-source Ollama model to answer with citations.</p>
-        <textarea id="question" placeholder="Example: Why do Muslims reject the Trinity?"></textarea>
-        <button id="ask">Ask</button>
-        <h2>Answer</h2>
-        <pre id="answer">Waiting for your question...</pre>
-        <div class="sources" id="sources"></div>
-      </section>
-    </main>
-    <script>
-      const question = document.getElementById("question");
-      const ask = document.getElementById("ask");
-      const answer = document.getElementById("answer");
-      const sources = document.getElementById("sources");
 
-      ask.addEventListener("click", async () => {
-        ask.disabled = true;
-        answer.textContent = "Thinking...";
-        sources.innerHTML = "";
-        try {
-          const response = await fetch("/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question: question.value })
-          });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.error || "Request failed");
-          answer.textContent = data.answer;
-          sources.innerHTML = `<h3>Retrieved sources</h3>${data.sources.map((src, index) => `
-            <div class="source"><strong>[${index + 1}] ${src.title}</strong><br><span class="muted">${src.source} · score ${src.score}</span></div>
-          `).join("")}`;
-        } catch (error) {
-          answer.textContent = `Error: ${error.message}`;
-        } finally {
-          ask.disabled = false;
-        }
-      });
-    </script>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Dawah Chatbot</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: #f6f7f3;
+      color: #172018;
+    }
+
+    main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 18px;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid #dfe6dc;
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: 0 12px 28px rgba(23, 32, 24, 0.08);
+    }
+
+    h1 {
+      margin-top: 0;
+      color: #0f5132;
+    }
+
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      min-height: 110px;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid #b9c8b6;
+      font: inherit;
+    }
+
+    button {
+      margin-top: 12px;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 20px;
+      background: #0f5132;
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      background: #f1f5ef;
+      border-radius: 12px;
+      padding: 16px;
+      line-height: 1.5;
+    }
+
+    .sources {
+      margin-top: 16px;
+      font-size: 0.95rem;
+    }
+
+    .source {
+      padding: 10px;
+      border-left: 4px solid #0f5132;
+      background: #f8faf7;
+      margin: 8px 0;
+    }
+
+    .muted {
+      color: #5d695d;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        background: #101610;
+        color: #edf4ea;
+      }
+
+      .card {
+        background: #172018;
+        border-color: #2c3b2d;
+      }
+
+      textarea,
+      pre,
+      .source {
+        background: #101610;
+        color: #edf4ea;
+        border-color: #3c4d3d;
+      }
+
+      .muted {
+        color: #b8c7b5;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <section class="card">
+      <h1>AI Dawah Chatbot</h1>
+      <p class="muted">Ask a question about Islam. This MVP retrieves from local Markdown sources and asks an
+        open-source Ollama model to answer with citations.</p>
+      <textarea id="question" placeholder="Example: Why do Muslims reject the Trinity?"></textarea>
+      <button id="ask">Ask</button>
+      <h2>Answer</h2>
+      <pre id="answer">Waiting for your question...</pre>
+      <div class="sources" id="sources"></div>
+    </section>
+  </main>
+  <script>
+    const question = document.getElementById("question");
+    const ask = document.getElementById("ask");
+    const answer = document.getElementById("answer");
+    const sources = document.getElementById("sources");
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    ask.addEventListener("click", async () => {
+      ask.disabled = true;
+      answer.textContent = "Thinking...";
+      sources.innerHTML = "";
+      try {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: question.value })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Request failed");
+        answer.textContent = data.answer;
+        sources.innerHTML = `<h3>Retrieved sources</h3>${data.sources.map((src, index) => `
+  <div class="source">
+    <strong>[${index + 1}] ${escapeHtml(src.title)}</strong><br>
+    <span class="muted">${escapeHtml(src.source)} · score ${escapeHtml(src.score)}</span>
+    <pre>${escapeHtml(src.excerpt || "No excerpt returned.")}</pre>
+  </div>
+`).join("")}`;
+      } catch (error) {
+        answer.textContent = `Error: ${error.message}`;
+      } finally {
+        ask.disabled = false;
+      }
+    });
+  </script>
+</body>
+
 </html>
