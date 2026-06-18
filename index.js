@@ -7,8 +7,15 @@ import { fileURLToPath } from "node:url";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const MODEL_PROVIDER = process.env.MODEL_PROVIDER || (process.env.GROQ_API_KEY ? "groq" : (process.env.OPENAI_COMPATIBLE_BASE_URL ? "openai-compatible" : "ollama"));
 const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://localhost:11434").replace(/\/$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:4b";
+const GROQ_BASE_URL = (process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1").replace(/\/$/, "");
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+const OPENAI_COMPATIBLE_BASE_URL = (process.env.OPENAI_COMPATIBLE_BASE_URL || "").replace(/\/$/, "");
+const OPENAI_COMPATIBLE_API_KEY = process.env.OPENAI_COMPATIBLE_API_KEY || "";
+const OPENAI_COMPATIBLE_MODEL = process.env.OPENAI_COMPATIBLE_MODEL || "";
 const MAX_CONTEXT_CHUNKS = Number(process.env.MAX_CONTEXT_CHUNKS || 5);
 const MAX_QUESTION_CHARS = Number(process.env.MAX_QUESTION_CHARS || 1200);
 
@@ -127,6 +134,23 @@ function extractOllamaText(data) {
   return (data.message?.content || data.response || "").trim();
 }
 
+function getModelName() {
+  if (MODEL_PROVIDER === "groq") return GROQ_MODEL;
+  return MODEL_PROVIDER === "openai-compatible" ? OPENAI_COMPATIBLE_MODEL : OLLAMA_MODEL;
+}
+
+function getProviderHint() {
+  if (MODEL_PROVIDER === "groq") {
+    return "Check GROQ_API_KEY, GROQ_MODEL, and your Groq account limits.";
+  }
+
+  if (MODEL_PROVIDER === "openai-compatible") {
+    return "Check OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_MODEL, and OPENAI_COMPATIBLE_API_KEY for your cloud model provider.";
+  }
+
+  return `Make sure Ollama is reachable at ${OLLAMA_BASE_URL} and the model '${OLLAMA_MODEL}' is pulled. If this app is on Render, set OLLAMA_BASE_URL to an external HTTPS model endpoint or deploy Ollama with the app.`;
+}
+
 async function postToOllama(pathname, body) {
   let response;
 
@@ -158,6 +182,69 @@ async function postToOllama(pathname, body) {
   }
 
   return response.json();
+}
+
+async function callChatCompletions({ baseUrl, apiKey, model, prompt, providerName }) {
+  if (!baseUrl || !model) {
+    throw new Error(`${providerName} requires a base URL and model name.`);
+  }
+
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2,
+        max_tokens: 700
+      })
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach ${providerName} model API at ${baseUrl}/chat/completions. ` +
+      `Check the provider base URL and API key. Original error: ${error.message}`
+    );
+  }
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+    throw new Error(`${providerName} model request failed (${response.status}): ${responseBody}`);
+  }
+
+  const data = await response.json();
+  return (data.choices?.[0]?.message?.content || data.choices?.[0]?.text || "").trim();
+}
+
+async function callGroq(prompt) {
+  if (!GROQ_API_KEY) throw new Error("GROQ_API_KEY is required when MODEL_PROVIDER=groq.");
+  return callChatCompletions({
+    baseUrl: GROQ_BASE_URL,
+    apiKey: GROQ_API_KEY,
+    model: GROQ_MODEL,
+    prompt,
+    providerName: "Groq"
+  });
+}
+
+async function callOpenAICompatible(prompt) {
+  if (!OPENAI_COMPATIBLE_BASE_URL || !OPENAI_COMPATIBLE_MODEL) {
+    throw new Error(
+      "OPENAI_COMPATIBLE_BASE_URL and OPENAI_COMPATIBLE_MODEL are required when MODEL_PROVIDER=openai-compatible."
+    );
+  }
+
+  return callChatCompletions({
+    baseUrl: OPENAI_COMPATIBLE_BASE_URL,
+    apiKey: OPENAI_COMPATIBLE_API_KEY,
+    model: OPENAI_COMPATIBLE_MODEL,
+    prompt,
+    providerName: "OpenAI-compatible"
+  });
 }
 
 async function callOllama(prompt) {
@@ -196,9 +283,22 @@ Write the final answer now. Do not return an empty response.`,
   return extractOllamaText(generateData);
 }
 
+async function callModel(prompt) {
+  if (MODEL_PROVIDER === "groq") return callGroq(prompt);
+  if (MODEL_PROVIDER === "openai-compatible") return callOpenAICompatible(prompt);
+  if (MODEL_PROVIDER === "ollama") return callOllama(prompt);
+  throw new Error(`Unsupported MODEL_PROVIDER '${MODEL_PROVIDER}'. Use 'ollama', 'groq', or 'openai-compatible'.`);
+}
+
 app.get("/health", async (req, res) => {
   const chunks = await getChunks();
-  res.json({ status: "ok", service: "ai-dawah-chatbot", model: OLLAMA_MODEL, chunks: chunks.length });
+  res.json({
+    status: "ok",
+    service: "ai-dawah-chatbot",
+    provider: MODEL_PROVIDER,
+    model: getModelName(),
+    chunks: chunks.length
+  });
 });
 
 app.post("/chat", async (req, res) => {
@@ -212,12 +312,12 @@ app.post("/chat", async (req, res) => {
     const chunks = await getChunks();
     const sources = retrieveRelevantChunks(question, chunks);
     const prompt = buildPrompt(question, sources);
-    const generatedAnswer = (await callOllama(prompt)).trim();
+    const generatedAnswer = (await callModel(prompt)).trim();
     const answer = generatedAnswer || buildFallbackAnswer(sources);
 
     res.json({
       answer,
-      model: OLLAMA_MODEL,
+      model: getModelName(),
       sources: sources.map(({ id, source, title, score, content }) => ({
         id,
         source,
@@ -229,12 +329,18 @@ app.post("/chat", async (req, res) => {
   } catch (error) {
     res.status(503).json({
       error: error.message,
-      hint: `Make sure Ollama is reachable at ${OLLAMA_BASE_URL} and the model '${OLLAMA_MODEL}' is pulled. If this app is on Render, set OLLAMA_BASE_URL to an external HTTPS model endpoint or deploy Ollama with the app.`
+      hint: getProviderHint()
     });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`AI dawah chatbot listening on port ${PORT}`);
-  console.log(`Using Ollama model ${OLLAMA_MODEL} at ${OLLAMA_BASE_URL}`);
+  if (MODEL_PROVIDER === "groq") {
+    console.log(`Using Groq model ${GROQ_MODEL} at ${GROQ_BASE_URL}`);
+  } else if (MODEL_PROVIDER === "openai-compatible") {
+    console.log(`Using OpenAI-compatible model ${OPENAI_COMPATIBLE_MODEL} at ${OPENAI_COMPATIBLE_BASE_URL}`);
+  } else {
+    console.log(`Using Ollama model ${OLLAMA_MODEL} at ${OLLAMA_BASE_URL}`);
+  }
 });
