@@ -102,6 +102,7 @@ function buildPrompt(question, contextChunks) {
 Rules:
 - Answer with adab, humility, and honesty.
 - Use ONLY the provided context for religious factual claims.
+- If the topic is not regarding Islam or christianity or religion then alert the user to only ask about Religion or islam or christianity.
 - If the context is not enough, say what is missing and suggest asking a qualified scholar or adding better sources.
 - Do not invent Quran verses, hadith, Bible references, scholars, or citations.
 - Do not insult Christians, Jews, atheists, Hindus, Muslims, or any person/group.
