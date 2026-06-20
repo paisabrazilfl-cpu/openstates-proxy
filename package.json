@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "test": "node --check index.js",
+    "transcripts:download": "node scripts/download-transcripts.js",
+    "transcripts:build": "node scripts/build-transcript-jsonl.js",
     "smoke": "npm test && echo \"Run npm start, then open http://localhost:3000 or curl /health.\""
   },
   "dependencies": {
