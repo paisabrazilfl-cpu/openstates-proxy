@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "test": "node --check index.js",
+    "test": "node --check index.js && node --check scripts/download-transcripts.js && node --check scripts/build-transcript-jsonl.js && node --check scripts/build-knowledge-corpus.js && node --check scripts/import-knowledge-to-supabase.js",
     "transcripts:download": "node scripts/download-transcripts.js",
     "transcripts:build": "node scripts/build-transcript-jsonl.js",
+    "knowledge:build": "node scripts/build-knowledge-corpus.js",
+    "knowledge:import": "node scripts/import-knowledge-to-supabase.js",
+    "knowledge:refresh": "npm run transcripts:build && npm run knowledge:build",
     "smoke": "npm test && echo \"Run npm start, then open http://localhost:3000 or curl /health.\""
   },
   "dependencies": {

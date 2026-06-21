@@ -70,18 +70,6 @@
       line-height: 1.5;
     }
 
-    .sources {
-      margin-top: 16px;
-      font-size: 0.95rem;
-    }
-
-    .source {
-      padding: 10px;
-      border-left: 4px solid #0f5132;
-      background: #f8faf7;
-      margin: 8px 0;
-    }
-
     .muted {
       color: #5d695d;
     }
@@ -98,8 +86,7 @@
       }
 
       textarea,
-      pre,
-      .source {
+      pre {
         background: #101610;
         color: #edf4ea;
         border-color: #3c4d3d;
@@ -116,33 +103,22 @@
   <main>
     <section class="card">
       <h1>AI Dawah Chatbot</h1>
-      <p class="muted">Ask a question about Islam. This MVP retrieves from local Markdown sources and asks an
-        open-source Ollama model to answer with citations.</p>
+      <p class="muted">Ask a question about Islam. This MVP retrieves from the local knowledge corpus and asks an
+        open-source Ollama model to answer.</p>
       <textarea id="question" placeholder="Example: Why do Muslims reject the Trinity?"></textarea>
       <button id="ask">Ask</button>
       <h2>Answer</h2>
       <pre id="answer">Waiting for your question...</pre>
-      <div class="sources" id="sources"></div>
     </section>
   </main>
   <script>
     const question = document.getElementById("question");
     const ask = document.getElementById("ask");
     const answer = document.getElementById("answer");
-    const sources = document.getElementById("sources");
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-    }
 
     ask.addEventListener("click", async () => {
       ask.disabled = true;
       answer.textContent = "Thinking...";
-      sources.innerHTML = "";
       try {
         const response = await fetch("/chat", {
           method: "POST",
@@ -152,13 +128,6 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Request failed");
         answer.textContent = data.answer;
-        sources.innerHTML = `<h3>Retrieved sources</h3>${data.sources.map((src, index) => `
-  <div class="source">
-    <strong>[${index + 1}] ${escapeHtml(src.title)}</strong><br>
-    <span class="muted">${escapeHtml(src.source)} · score ${escapeHtml(src.score)}</span>
-    <pre>${escapeHtml(src.excerpt || "No excerpt returned.")}</pre>
-  </div>
-`).join("")}`;
       } catch (error) {
         answer.textContent = `Error: ${error.message}`;
       } finally {

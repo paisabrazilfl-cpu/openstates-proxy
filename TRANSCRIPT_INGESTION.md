@@ -1,6 +1,6 @@
 # Transcript Ingestion
 
-This repo can pull YouTube subtitles with `yt-dlp` and convert them into JSONL chunks for retrieval or later import work.
+This repo can pull YouTube subtitles with `yt-dlp`, convert them into transcript JSONL chunks, and then merge them into the single chatbot knowledge corpus.
 
 Only use videos and transcripts that you have permission to download and use.
 
@@ -61,7 +61,7 @@ Then run:
 npm run transcripts:download
 ```
 
-## Build JSONL
+## Build Transcript JSONL
 
 After subtitles are downloaded, build the transcript chunks:
 
@@ -75,6 +75,20 @@ The generated file is:
 data_processed/debate_transcripts.jsonl
 ```
 
+Then rebuild the unified chatbot corpus:
+
+```powershell
+npm run knowledge:build
+```
+
+The chatbot reads from this one file:
+
+```text
+data_processed/knowledge_corpus.jsonl
+```
+
+For Render deployment, the better long-term setup is to import the corpus into Supabase and let Render read from Supabase. Do not commit `transcripts_raw/`, `data_processed/debate_transcripts.jsonl`, or `data_processed/knowledge_corpus.jsonl`.
+
 Raw subtitles are saved under:
 
 ```text
@@ -83,6 +97,99 @@ transcripts_raw/
 
 Both generated folders are ignored by Git so you do not accidentally commit large transcript dumps.
 
+## Full Refresh
+
+After adding more transcripts, use:
+
+```powershell
+npm run knowledge:refresh
+```
+
+That runs:
+
+```text
+npm run transcripts:build
+npm run knowledge:build
+```
+
+## Adding Quran, Hadith, Lectures, or Notes
+
+Add source JSONL files under:
+
+```text
+data/
+```
+
+For example:
+
+```text
+data/quran.jsonl
+data/hadith.jsonl
+data/lectures.jsonl
+data/notes.jsonl
+```
+
+Each line should be one searchable record:
+
+```json
+{"id":"note_example","source_type":"topic_note","title":"Example title","text":"The searchable text goes here.","topic_tags":["example"],"references":[],"media":null}
+```
+
+For video or lecture records, include media metadata so the app can show related videos later:
+
+```json
+{"id":"lecture_example_1","source_type":"lecture","title":"Lecture title","text":"Transcript or notes chunk.","topic_tags":["tawheed"],"references":[],"media":{"video_url":"https://www.youtube.com/watch?v=VIDEO_ID","channel":"Channel name","start_seconds":120}}
+```
+
+After editing any `data/*.jsonl` file, run:
+
+```powershell
+npm run knowledge:build
+```
+
+Then import the rebuilt corpus into Supabase if Render is using Supabase.
+
+## Supabase + Render
+
+Use Supabase when the chatbot data is too large or changes too often to keep pushing generated files to GitHub.
+
+1. Create a Supabase project.
+2. Open the Supabase SQL editor.
+3. Run the SQL from:
+
+```text
+SUPABASE_SETUP.sql
+```
+
+4. Build the local corpus:
+
+```powershell
+npm run knowledge:refresh
+```
+
+5. Set your local Supabase env vars:
+
+```powershell
+$env:SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
+$env:SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY"
+```
+
+6. Import the corpus:
+
+```powershell
+npm run knowledge:import
+```
+
+7. In Render, set these environment variables:
+
+```text
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+KNOWLEDGE_SOURCE=supabase
+```
+
+The service role key must stay server-side in Render. Do not put it in browser JavaScript.
+
 ## Direct Node Commands
 
 If you do not want to use npm, run the scripts directly:
@@ -90,6 +197,7 @@ If you do not want to use npm, run the scripts directly:
 ```powershell
 node scripts/download-transcripts.js --channel-url "https://www.youtube.com/@CHANNEL_HANDLE/videos" --playlist-end 10
 node scripts/build-transcript-jsonl.js
+node scripts/build-knowledge-corpus.js
 ```
 
 ## Useful Options

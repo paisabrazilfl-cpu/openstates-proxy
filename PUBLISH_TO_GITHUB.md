@@ -11,7 +11,11 @@ The chatbot version should contain these paths:
 README.md
 index.js
 package.json
-data/jesus-in-islam.md
-data/safety.md
-data/tawheed.md
+data/notes.jsonl
 public/index.html
+SUPABASE_SETUP.sql
+scripts/build-knowledge-corpus.js
+scripts/build-transcript-jsonl.js
+scripts/download-transcripts.js
+scripts/import-knowledge-to-supabase.js
+```

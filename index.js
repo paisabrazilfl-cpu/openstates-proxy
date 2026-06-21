@@ -18,9 +18,17 @@ const OPENAI_COMPATIBLE_API_KEY = process.env.OPENAI_COMPATIBLE_API_KEY || "";
 const OPENAI_COMPATIBLE_MODEL = process.env.OPENAI_COMPATIBLE_MODEL || "";
 const MAX_CONTEXT_CHUNKS = Number(process.env.MAX_CONTEXT_CHUNKS || 5);
 const MAX_QUESTION_CHARS = Number(process.env.MAX_QUESTION_CHARS || 1200);
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "knowledge_documents";
+const KNOWLEDGE_SOURCE = process.env.KNOWLEDGE_SOURCE || (SUPABASE_URL && SUPABASE_KEY ? "supabase" : "file");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "data");
+const KNOWLEDGE_CORPUS_FILE = process.env.KNOWLEDGE_CORPUS_FILE
+  ? path.resolve(process.env.KNOWLEDGE_CORPUS_FILE)
+  : path.join(__dirname, "data_processed", "knowledge_corpus.jsonl");
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -40,36 +48,95 @@ function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9:'-]{3,}/g) || []).filter((token) => !STOP_WORDS.has(token));
 }
 
-function splitMarkdownIntoChunks(source, text) {
-  const sections = text
-    .split(/\n(?=#{1,3}\s+)/g)
-    .map((section) => section.trim())
-    .filter(Boolean);
+function normalizeKnowledgeRecord(record, location) {
+  const text = String(record.text || record.content || "").trim();
+  if (!text) {
+    throw new Error(`${location} is missing text/content.`);
+  }
 
-  return sections.map((content, index) => {
-    const titleMatch = content.match(/^#{1,3}\s+(.+)$/m);
-    const title = titleMatch ? titleMatch[1].trim() : `${source} section ${index + 1}`;
-    return {
-      id: `${source}#${index + 1}`,
-      source,
-      title,
-      content,
-      tokens: tokenize(content)
-    };
-  });
+  const sourceType = String(record.source_type || record.type || "knowledge");
+  return {
+    id: String(record.id || location),
+    source: String(record.source || sourceType),
+    sourceType,
+    title: String(record.title || sourceType),
+    content: text,
+    topicTags: Array.isArray(record.topic_tags) ? record.topic_tags : [],
+    references: Array.isArray(record.references) ? record.references : [],
+    media: record.media || null,
+    metadata: record.metadata || {},
+    tokens: tokenize(text)
+  };
+}
+
+async function loadKnowledgeBaseFromFile() {
+  let content;
+  try {
+    content = await fs.readFile(KNOWLEDGE_CORPUS_FILE, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(
+        `Knowledge corpus not found at ${KNOWLEDGE_CORPUS_FILE}. ` +
+        "Run 'npm run knowledge:build' before starting the chatbot."
+      );
+    }
+    throw error;
+  }
+
+  return content
+    .split(/\r?\n/)
+    .map((line, index) => ({ line: line.trim(), lineNumber: index + 1 }))
+    .filter(({ line }) => line)
+    .map(({ line, lineNumber }) => {
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`${KNOWLEDGE_CORPUS_FILE}:${lineNumber} is not valid JSON: ${error.message}`);
+      }
+
+      return normalizeKnowledgeRecord(record, `${KNOWLEDGE_CORPUS_FILE}:${lineNumber}`);
+    });
+}
+
+async function loadKnowledgeBaseFromSupabase() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required when KNOWLEDGE_SOURCE=supabase.");
+  }
+
+  const records = [];
+  const pageSize = 1000;
+
+  for (let offset = 0; ; offset += pageSize) {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?select=*&order=id.asc`, {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        Range: `${offset}-${offset + pageSize - 1}`
+      }
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Supabase knowledge load failed (${response.status}): ${body}`);
+    }
+
+    const page = await response.json();
+    records.push(...page);
+    if (page.length < pageSize) break;
+  }
+
+  if (!records.length) {
+    throw new Error(`No records found in Supabase table '${SUPABASE_TABLE}'. Run 'npm run knowledge:import' first.`);
+  }
+
+  return records.map((record, index) => normalizeKnowledgeRecord(record, `${SUPABASE_TABLE}:${index + 1}`));
 }
 
 async function loadKnowledgeBase() {
-  const files = await fs.readdir(DATA_DIR);
-  const markdownFiles = files.filter((file) => file.endsWith(".md")).sort();
-  const allChunks = [];
-
-  for (const file of markdownFiles) {
-    const content = await fs.readFile(path.join(DATA_DIR, file), "utf8");
-    allChunks.push(...splitMarkdownIntoChunks(file, content));
-  }
-
-  return allChunks;
+  if (KNOWLEDGE_SOURCE === "supabase") return loadKnowledgeBaseFromSupabase();
+  if (KNOWLEDGE_SOURCE === "file") return loadKnowledgeBaseFromFile();
+  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file' or 'supabase'.`);
 }
 
 async function getChunks() {
@@ -92,9 +159,30 @@ function retrieveRelevantChunks(question, chunks) {
     .slice(0, MAX_CONTEXT_CHUNKS);
 }
 
+function prettySourceType(sourceType) {
+  return String(sourceType || "knowledge").replace(/_/g, " ");
+}
+
+function formatContextChunk(chunk, index) {
+  const details = [
+    `Source type: ${prettySourceType(chunk.sourceType)}`,
+    `Title: ${chunk.title}`
+  ];
+
+  if (chunk.references.length) {
+    details.push(`References: ${JSON.stringify(chunk.references)}`);
+  }
+
+  if (chunk.media?.video_url) {
+    details.push(`Video: ${chunk.media.video_url}`);
+  }
+
+  return `[${index + 1}] ${details.join(" | ")}\n${chunk.content}`;
+}
+
 function buildPrompt(question, contextChunks) {
   const context = contextChunks
-    .map((chunk, index) => `[${index + 1}] Source: ${chunk.source} | ${chunk.title}\n${chunk.content}`)
+    .map((chunk, index) => formatContextChunk(chunk, index))
     .join("\n\n---\n\n");
 
   return `You are a respectful Islamic educational assistant for dawah conversations.
@@ -109,6 +197,8 @@ Rules:
 - Do not insult Christians, Jews, atheists, Hindus, Muslims, or any person/group.
 - If debating, summarize the concern fairly before responding.
 - For fatwa, marriage/divorce, abuse, mental health, violence, or sectarian takfir topics, avoid issuing rulings and recommend qualified help.
+- Use Quran and hadith references only when they appear in the provided context.
+- Do not show a retrieved sources section.
 - End with a short invitation for a follow-up question.
 
 Context:
@@ -117,7 +207,7 @@ ${context || "No relevant local context was found."}
 User question:
 ${question}
 
-Answer with brief citations like [1], [2] that refer to the context above.`;
+Answer directly using the context above.`;
 }
 
 function buildFallbackAnswer(contextChunks) {
@@ -125,11 +215,27 @@ function buildFallbackAnswer(contextChunks) {
     return "I could not get a model answer, and I did not find relevant local sources. Please add more knowledge-base documents or rephrase the question.";
   }
 
-  const sourceList = contextChunks
-    .map((chunk, index) => `[${index + 1}] ${chunk.title} (${chunk.source})\n${chunk.content}`)
-    .join("\n\n");
+  return "I found relevant local knowledge, but the model did not return an answer. Please try again or rephrase the question.";
+}
 
-  return `I could not get a generated model answer, but I found relevant local source material. Please review these sources:\n\n${sourceList}`;
+function buildRelatedVideos(contextChunks) {
+  const seen = new Set();
+  const videos = [];
+
+  for (const chunk of contextChunks) {
+    const url = chunk.media?.video_url;
+    if (!url || seen.has(url)) continue;
+
+    seen.add(url);
+    videos.push({
+      title: chunk.title,
+      url,
+      channel: chunk.media?.channel || null,
+      start_seconds: chunk.media?.start_seconds ?? null
+    });
+  }
+
+  return videos.slice(0, 5);
 }
 
 function extractOllamaText(data) {
@@ -299,6 +405,10 @@ app.get("/health", async (req, res) => {
     service: "ai-dawah-chatbot",
     provider: MODEL_PROVIDER,
     model: getModelName(),
+    knowledgeSource: KNOWLEDGE_SOURCE,
+    corpus: KNOWLEDGE_SOURCE === "supabase"
+      ? `supabase:${SUPABASE_TABLE}`
+      : path.relative(__dirname, KNOWLEDGE_CORPUS_FILE).replace(/\\/g, "/"),
     chunks: chunks.length
   });
 });
@@ -312,21 +422,15 @@ app.post("/chat", async (req, res) => {
     }
 
     const chunks = await getChunks();
-    const sources = retrieveRelevantChunks(question, chunks);
-    const prompt = buildPrompt(question, sources);
+    const contextChunks = retrieveRelevantChunks(question, chunks);
+    const prompt = buildPrompt(question, contextChunks);
     const generatedAnswer = (await callModel(prompt)).trim();
-    const answer = generatedAnswer || buildFallbackAnswer(sources);
+    const answer = generatedAnswer || buildFallbackAnswer(contextChunks);
 
     res.json({
       answer,
       model: getModelName(),
-      sources: sources.map(({ id, source, title, score, content }) => ({
-        id,
-        source,
-        title,
-        score,
-        excerpt: content.length > 700 ? `${content.slice(0, 700)}...` : content
-      }))
+      relatedVideos: buildRelatedVideos(contextChunks)
     });
   } catch (error) {
     res.status(503).json({
