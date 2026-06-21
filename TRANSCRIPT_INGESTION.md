@@ -87,7 +87,7 @@ The chatbot reads from this one file:
 data_processed/knowledge_corpus.jsonl
 ```
 
-For Render deployment, the better long-term setup is to import the corpus into Supabase and let Render read from Supabase. Do not commit `transcripts_raw/`, `data_processed/debate_transcripts.jsonl`, or `data_processed/knowledge_corpus.jsonl`.
+For Render-only deployment, commit `data_processed/knowledge_corpus.jsonl` to GitHub so Render can read it at startup. Do not commit `transcripts_raw/` or `data_processed/debate_transcripts.jsonl`.
 
 Raw subtitles are saved under:
 
@@ -95,7 +95,7 @@ Raw subtitles are saved under:
 transcripts_raw/
 ```
 
-Both generated folders are ignored by Git so you do not accidentally commit large transcript dumps.
+Raw transcript dumps and intermediate transcript JSONL are ignored by Git so you do not accidentally commit large transcript dumps. The final `data_processed/knowledge_corpus.jsonl` file is allowed because Render needs it for the current file-based setup.
 
 ## Full Refresh
 
@@ -147,7 +147,7 @@ After editing any `data/*.jsonl` file, run:
 npm run knowledge:build
 ```
 
-Then import the rebuilt corpus into Supabase if Render is using Supabase.
+Then commit the updated `data_processed/knowledge_corpus.jsonl` file if Render is using the file-based setup.
 
 ## Supabase + Render
 

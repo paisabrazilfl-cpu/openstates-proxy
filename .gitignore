@@ -3,4 +3,5 @@ node_modules/
 .DS_Store
 *.log
 transcripts_raw/
-data_processed/
+data_processed/*
+!data_processed/knowledge_corpus.jsonl

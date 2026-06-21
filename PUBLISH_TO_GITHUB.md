@@ -12,6 +12,7 @@ README.md
 index.js
 package.json
 data/notes.jsonl
+data_processed/knowledge_corpus.jsonl
 public/index.html
 SUPABASE_SETUP.sql
 scripts/build-knowledge-corpus.js
