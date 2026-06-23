@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
 import path from "node:path";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -219,6 +220,17 @@ function assertUniqueIds(records) {
   }
 }
 
+async function writeCorpusFiles(outputFile, records) {
+  const content = records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+  const gzipFile = outputFile.endsWith(".gz") ? outputFile : `${outputFile}.gz`;
+
+  await fs.mkdir(path.dirname(outputFile), { recursive: true });
+  await fs.writeFile(outputFile, content, "utf8");
+  await fs.writeFile(gzipFile, zlib.gzipSync(content, { level: 9 }));
+
+  return { outputFile, gzipFile };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -251,14 +263,10 @@ async function main() {
 
   assertUniqueIds(records);
 
-  await fs.mkdir(path.dirname(options.outputFile), { recursive: true });
-  await fs.writeFile(
-    options.outputFile,
-    records.map((record) => JSON.stringify(record)).join("\n") + "\n",
-    "utf8"
-  );
+  const { outputFile, gzipFile } = await writeCorpusFiles(options.outputFile, records);
 
-  console.log(`Wrote ${records.length} knowledge records to ${options.outputFile}`);
+  console.log(`Wrote ${records.length} knowledge records to ${outputFile}`);
+  console.log(`Wrote compressed corpus to ${gzipFile}`);
   console.log(`Included ${sourceFiles.length} source JSONL file(s).`);
   if (!(await fileExists(options.transcriptsFile))) {
     console.log(`Transcript file not found, so transcripts were skipped: ${options.transcriptsFile}`);
