@@ -81,13 +81,20 @@ Then rebuild the unified chatbot corpus:
 npm run knowledge:build
 ```
 
-The chatbot reads from this one file:
+This creates both files:
 
 ```text
 data_processed/knowledge_corpus.jsonl
+data_processed/knowledge_corpus.jsonl.gz
 ```
 
-For Render-only deployment, commit `data_processed/knowledge_corpus.jsonl` to GitHub so Render can read it at startup. Do not commit `transcripts_raw/` or `data_processed/debate_transcripts.jsonl`.
+For Render-only deployment, commit the compressed file only:
+
+```text
+data_processed/knowledge_corpus.jsonl.gz
+```
+
+Do not commit `transcripts_raw/`, `data_processed/debate_transcripts.jsonl`, or the large plain `data_processed/knowledge_corpus.jsonl` file.
 
 Raw subtitles are saved under:
 
@@ -95,7 +102,7 @@ Raw subtitles are saved under:
 transcripts_raw/
 ```
 
-Raw transcript dumps and intermediate transcript JSONL are ignored by Git so you do not accidentally commit large transcript dumps. The final `data_processed/knowledge_corpus.jsonl` file is allowed because Render needs it for the current file-based setup.
+Raw transcript dumps, intermediate transcript JSONL, and the large plain corpus are ignored by Git. The compressed corpus is allowed because Render can read it at startup.
 
 ## Full Refresh
 
@@ -110,6 +117,14 @@ That runs:
 ```text
 npm run transcripts:build
 npm run knowledge:build
+```
+
+Then commit the updated compressed corpus:
+
+```powershell
+git add data_processed\knowledge_corpus.jsonl.gz
+git commit -m "Update compressed knowledge corpus"
+git push origin main
 ```
 
 ## Adding Quran, Hadith, Lectures, or Notes
@@ -147,7 +162,7 @@ After editing any `data/*.jsonl` file, run:
 npm run knowledge:build
 ```
 
-Then commit the updated `data_processed/knowledge_corpus.jsonl` file if Render is using the file-based setup.
+Then commit the updated `data_processed/knowledge_corpus.jsonl.gz` file if Render is using the file-based setup.
 
 ## Supabase + Render
 
