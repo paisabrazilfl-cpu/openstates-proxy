@@ -3,6 +3,8 @@ import cors from "cors";
 import fetch from "node-fetch";
 import fs from "node:fs/promises";
 import path from "node:path";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const app = express();
@@ -26,9 +28,11 @@ const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "knowledge_documents";
 const KNOWLEDGE_SOURCE = process.env.KNOWLEDGE_SOURCE || (SUPABASE_URL && SUPABASE_KEY ? "supabase" : "file");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const gunzip = promisify(zlib.gunzip);
 const KNOWLEDGE_CORPUS_FILE = process.env.KNOWLEDGE_CORPUS_FILE
   ? path.resolve(process.env.KNOWLEDGE_CORPUS_FILE)
   : path.join(__dirname, "data_processed", "knowledge_corpus.jsonl");
+let loadedKnowledgeCorpusFile = KNOWLEDGE_CORPUS_FILE;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -46,6 +50,39 @@ let chunksPromise;
 
 function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9:'-]{3,}/g) || []).filter((token) => !STOP_WORDS.has(token));
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function readKnowledgeCorpusFile() {
+  const candidates = process.env.KNOWLEDGE_CORPUS_FILE
+    ? [KNOWLEDGE_CORPUS_FILE]
+    : [`${KNOWLEDGE_CORPUS_FILE}.gz`, KNOWLEDGE_CORPUS_FILE];
+
+  for (const candidate of candidates) {
+    if (!(await fileExists(candidate))) continue;
+
+    const buffer = await fs.readFile(candidate);
+    const content = candidate.endsWith(".gz")
+      ? (await gunzip(buffer)).toString("utf8")
+      : buffer.toString("utf8");
+
+    loadedKnowledgeCorpusFile = candidate;
+    return { content, filePath: candidate };
+  }
+
+  throw new Error(
+    `Knowledge corpus not found. Looked for: ${candidates.join(", ")}. ` +
+    "Run 'npm run knowledge:build' before starting the chatbot."
+  );
 }
 
 function normalizeKnowledgeRecord(record, location) {
@@ -70,18 +107,7 @@ function normalizeKnowledgeRecord(record, location) {
 }
 
 async function loadKnowledgeBaseFromFile() {
-  let content;
-  try {
-    content = await fs.readFile(KNOWLEDGE_CORPUS_FILE, "utf8");
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      throw new Error(
-        `Knowledge corpus not found at ${KNOWLEDGE_CORPUS_FILE}. ` +
-        "Run 'npm run knowledge:build' before starting the chatbot."
-      );
-    }
-    throw error;
-  }
+  const { content, filePath } = await readKnowledgeCorpusFile();
 
   return content
     .split(/\r?\n/)
@@ -92,10 +118,10 @@ async function loadKnowledgeBaseFromFile() {
       try {
         record = JSON.parse(line);
       } catch (error) {
-        throw new Error(`${KNOWLEDGE_CORPUS_FILE}:${lineNumber} is not valid JSON: ${error.message}`);
+        throw new Error(`${filePath}:${lineNumber} is not valid JSON: ${error.message}`);
       }
 
-      return normalizeKnowledgeRecord(record, `${KNOWLEDGE_CORPUS_FILE}:${lineNumber}`);
+      return normalizeKnowledgeRecord(record, `${filePath}:${lineNumber}`);
     });
 }
 
@@ -408,7 +434,7 @@ app.get("/health", async (req, res) => {
     knowledgeSource: KNOWLEDGE_SOURCE,
     corpus: KNOWLEDGE_SOURCE === "supabase"
       ? `supabase:${SUPABASE_TABLE}`
-      : path.relative(__dirname, KNOWLEDGE_CORPUS_FILE).replace(/\\/g, "/"),
+      : path.relative(__dirname, loadedKnowledgeCorpusFile).replace(/\\/g, "/"),
     chunks: chunks.length
   });
 });
