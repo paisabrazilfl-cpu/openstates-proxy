@@ -25,6 +25,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "knowledge_documents";
+const SUPABASE_MATCH_FUNCTION = process.env.SUPABASE_MATCH_FUNCTION || "match_knowledge_documents";
 const KNOWLEDGE_SOURCE = process.env.KNOWLEDGE_SOURCE || (SUPABASE_URL && SUPABASE_KEY ? "supabase" : "file");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -46,7 +47,7 @@ const STOP_WORDS = new Set([
   "was", "were", "what", "when", "where", "which", "while", "who", "why", "will", "with", "would", "you", "your"
 ]);
 
-let chunksPromise;
+let fileChunksPromise;
 
 function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9:'-]{3,}/g) || []).filter((token) => !STOP_WORDS.has(token));
@@ -64,6 +65,18 @@ async function fileExists(filePath) {
 
 function displayPath(filePath) {
   return path.relative(__dirname, filePath).replace(/\\/g, "/") || filePath;
+}
+
+function getSupabaseHeaders(extra = {}) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required when KNOWLEDGE_SOURCE=supabase.");
+  }
+
+  return {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+    ...extra
+  };
 }
 
 async function readKnowledgeCorpusFile() {
@@ -116,6 +129,7 @@ function normalizeKnowledgeRecord(record, location) {
     references: Array.isArray(record.references) ? record.references : [],
     media: record.media || null,
     metadata: record.metadata || {},
+    score: Number(record.score || 0),
     tokens: tokenize(text)
   };
 }
@@ -139,58 +153,18 @@ async function loadKnowledgeBaseFromFile() {
     });
 }
 
-async function loadKnowledgeBaseFromSupabase() {
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
-    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required when KNOWLEDGE_SOURCE=supabase.");
-  }
-
-  const records = [];
-  const pageSize = 1000;
-
-  for (let offset = 0; ; offset += pageSize) {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?select=*&order=id.asc`, {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        Range: `${offset}-${offset + pageSize - 1}`
-      }
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Supabase knowledge load failed (${response.status}): ${body}`);
-    }
-
-    const page = await response.json();
-    records.push(...page);
-    if (page.length < pageSize) break;
-  }
-
-  if (!records.length) {
-    throw new Error(`No records found in Supabase table '${SUPABASE_TABLE}'. Run 'npm run knowledge:import' first.`);
-  }
-
-  return records.map((record, index) => normalizeKnowledgeRecord(record, `${SUPABASE_TABLE}:${index + 1}`));
-}
-
-async function loadKnowledgeBase() {
-  if (KNOWLEDGE_SOURCE === "supabase") return loadKnowledgeBaseFromSupabase();
-  if (KNOWLEDGE_SOURCE === "file") return loadKnowledgeBaseFromFile();
-  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file' or 'supabase'.`);
-}
-
-async function getChunks() {
-  if (!chunksPromise) chunksPromise = loadKnowledgeBase();
+async function getFileChunks() {
+  if (!fileChunksPromise) fileChunksPromise = loadKnowledgeBaseFromFile();
 
   try {
-    return await chunksPromise;
+    return await fileChunksPromise;
   } catch (error) {
-    chunksPromise = null;
+    fileChunksPromise = null;
     throw error;
   }
 }
 
-function retrieveRelevantChunks(question, chunks) {
+function retrieveRelevantFileChunks(question, chunks) {
   const questionTokens = tokenize(question);
   const questionSet = new Set(questionTokens);
 
@@ -203,6 +177,70 @@ function retrieveRelevantChunks(question, chunks) {
     .filter((chunk) => chunk.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_CONTEXT_CHUNKS);
+}
+
+async function retrieveRelevantSupabaseChunks(question) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${encodeURIComponent(SUPABASE_MATCH_FUNCTION)}`, {
+    method: "POST",
+    headers: getSupabaseHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      query_text: question,
+      match_count: Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20))
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `Supabase knowledge search failed (${response.status}): ${body}. ` +
+      `Run SUPABASE_SETUP.sql in Supabase and confirm the '${SUPABASE_MATCH_FUNCTION}' function exists.`
+    );
+  }
+
+  const records = await response.json();
+  return records.map((record, index) => normalizeKnowledgeRecord(record, `${SUPABASE_MATCH_FUNCTION}:${index + 1}`));
+}
+
+async function retrieveContextChunks(question) {
+  if (KNOWLEDGE_SOURCE === "supabase") return retrieveRelevantSupabaseChunks(question);
+  if (KNOWLEDGE_SOURCE === "file") {
+    const chunks = await getFileChunks();
+    return retrieveRelevantFileChunks(question, chunks);
+  }
+  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file' or 'supabase'.`);
+}
+
+async function checkKnowledgeStatus() {
+  if (KNOWLEDGE_SOURCE === "supabase") {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}?select=id&limit=1`, {
+      headers: getSupabaseHeaders()
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Supabase health check failed (${response.status}): ${body}`);
+    }
+
+    const rows = await response.json();
+    return {
+      corpus: `supabase:${SUPABASE_TABLE}`,
+      searchMode: SUPABASE_MATCH_FUNCTION,
+      recordsAvailable: rows.length > 0,
+      chunks: null
+    };
+  }
+
+  if (KNOWLEDGE_SOURCE === "file") {
+    const chunks = await getFileChunks();
+    return {
+      corpus: displayPath(loadedKnowledgeCorpusFile),
+      searchMode: "local_memory",
+      recordsAvailable: chunks.length > 0,
+      chunks: chunks.length
+    };
+  }
+
+  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file' or 'supabase'.`);
 }
 
 function prettySourceType(sourceType) {
@@ -446,17 +484,14 @@ async function callModel(prompt) {
 
 app.get("/health", async (req, res) => {
   try {
-    const chunks = await getChunks();
+    const knowledge = await checkKnowledgeStatus();
     res.json({
       status: "ok",
       service: "ai-dawah-chatbot",
       provider: MODEL_PROVIDER,
       model: getModelName(),
       knowledgeSource: KNOWLEDGE_SOURCE,
-      corpus: KNOWLEDGE_SOURCE === "supabase"
-        ? `supabase:${SUPABASE_TABLE}`
-        : displayPath(loadedKnowledgeCorpusFile),
-      chunks: chunks.length
+      ...knowledge
     });
   } catch (error) {
     res.status(503).json({
@@ -481,8 +516,7 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: `Question is too long. Limit is ${MAX_QUESTION_CHARS} characters.` });
     }
 
-    const chunks = await getChunks();
-    const contextChunks = retrieveRelevantChunks(question, chunks);
+    const contextChunks = await retrieveContextChunks(question);
     const prompt = buildPrompt(question, contextChunks);
     const generatedAnswer = (await callModel(prompt)).trim();
     const answer = generatedAnswer || buildFallbackAnswer(contextChunks);
