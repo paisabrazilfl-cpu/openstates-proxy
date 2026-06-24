@@ -61,71 +61,79 @@ Then run:
 npm run transcripts:download
 ```
 
-## Build Transcript JSONL
+## Build The Corpus
 
-After subtitles are downloaded, build the transcript chunks:
-
-```powershell
-npm run transcripts:build
-```
-
-The generated file is:
-
-```text
-data_processed/debate_transcripts.jsonl
-```
-
-Then rebuild the unified chatbot corpus:
-
-```powershell
-npm run knowledge:build
-```
-
-This creates both files:
-
-```text
-data_processed/knowledge_corpus.jsonl
-data_processed/knowledge_corpus.jsonl.gz
-```
-
-For Render-only deployment, commit the compressed file only:
-
-```text
-data_processed/knowledge_corpus.jsonl.gz
-```
-
-Do not commit `transcripts_raw/`, `data_processed/debate_transcripts.jsonl`, or the large plain `data_processed/knowledge_corpus.jsonl` file.
-
-Raw subtitles are saved under:
-
-```text
-transcripts_raw/
-```
-
-Raw transcript dumps, intermediate transcript JSONL, and the large plain corpus are ignored by Git. The compressed corpus is allowed because Render can read it at startup.
-
-## Full Refresh
-
-After adding more transcripts, use:
+After subtitles are downloaded, build transcript chunks and the unified chatbot corpus:
 
 ```powershell
 npm run knowledge:refresh
 ```
 
-That runs:
+That creates:
 
 ```text
-npm run transcripts:build
-npm run knowledge:build
+data_processed/debate_transcripts.jsonl
+data_processed/knowledge_corpus.jsonl
+data_processed/knowledge_corpus.jsonl.gz
 ```
 
-Then commit the updated compressed corpus:
+For a small Render-only test, the app can read `data_processed/knowledge_corpus.jsonl.gz`.
+
+For a large corpus, use Supabase instead. Do not commit `transcripts_raw/`, `data_processed/debate_transcripts.jsonl`, or the large plain `data_processed/knowledge_corpus.jsonl` file.
+
+## Supabase + Render
+
+Use Supabase when the chatbot data is too large or changes too often to keep pushing generated files to GitHub.
+
+1. Create a Supabase project.
+2. Open the Supabase SQL editor.
+3. Run all SQL from:
+
+```text
+SUPABASE_SETUP.sql
+```
+
+4. Build the local corpus:
 
 ```powershell
-git add data_processed\knowledge_corpus.jsonl.gz
-git commit -m "Update compressed knowledge corpus"
-git push origin main
+npm run knowledge:refresh
 ```
+
+5. Set your local Supabase env vars:
+
+```powershell
+$env:SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
+$env:SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY"
+```
+
+6. Import the corpus into Supabase:
+
+```powershell
+npm run knowledge:import
+```
+
+7. In Render, set these environment variables:
+
+```text
+KNOWLEDGE_SOURCE=supabase
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+```
+
+The app asks Supabase for only the top matching records per question. Render does not load the whole corpus into memory when `KNOWLEDGE_SOURCE=supabase`.
+
+The service role key must stay server-side in Render. Do not put it in browser JavaScript.
+
+## Updating The Knowledge Base Later
+
+After downloading more transcripts or editing any `data/*.jsonl` file:
+
+```powershell
+npm run knowledge:refresh
+npm run knowledge:import
+```
+
+Then Render will use the updated Supabase data without needing to push the large corpus file to GitHub.
 
 ## Adding Quran, Hadith, Lectures, or Notes
 
@@ -156,55 +164,6 @@ For video or lecture records, include media metadata so the app can show related
 {"id":"lecture_example_1","source_type":"lecture","title":"Lecture title","text":"Transcript or notes chunk.","topic_tags":["tawheed"],"references":[],"media":{"video_url":"https://www.youtube.com/watch?v=VIDEO_ID","channel":"Channel name","start_seconds":120}}
 ```
 
-After editing any `data/*.jsonl` file, run:
-
-```powershell
-npm run knowledge:build
-```
-
-Then commit the updated `data_processed/knowledge_corpus.jsonl.gz` file if Render is using the file-based setup.
-
-## Supabase + Render
-
-Use Supabase when the chatbot data is too large or changes too often to keep pushing generated files to GitHub.
-
-1. Create a Supabase project.
-2. Open the Supabase SQL editor.
-3. Run the SQL from:
-
-```text
-SUPABASE_SETUP.sql
-```
-
-4. Build the local corpus:
-
-```powershell
-npm run knowledge:refresh
-```
-
-5. Set your local Supabase env vars:
-
-```powershell
-$env:SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
-$env:SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY"
-```
-
-6. Import the corpus:
-
-```powershell
-npm run knowledge:import
-```
-
-7. In Render, set these environment variables:
-
-```text
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
-KNOWLEDGE_SOURCE=supabase
-```
-
-The service role key must stay server-side in Render. Do not put it in browser JavaScript.
-
 ## Direct Node Commands
 
 If you do not want to use npm, run the scripts directly:
@@ -213,6 +172,7 @@ If you do not want to use npm, run the scripts directly:
 node scripts/download-transcripts.js --channel-url "https://www.youtube.com/@CHANNEL_HANDLE/videos" --playlist-end 10
 node scripts/build-transcript-jsonl.js
 node scripts/build-knowledge-corpus.js
+node scripts/import-knowledge-to-supabase.js
 ```
 
 ## Useful Options
