@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import mysql from "mysql2/promise";
 import fs from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -26,7 +27,16 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "knowledge_documents";
 const SUPABASE_MATCH_FUNCTION = process.env.SUPABASE_MATCH_FUNCTION || "match_knowledge_documents";
-const KNOWLEDGE_SOURCE = process.env.KNOWLEDGE_SOURCE || (SUPABASE_URL && SUPABASE_KEY ? "supabase" : "file");
+const HOSTINGER_DB_HOST = process.env.HOSTINGER_DB_HOST || process.env.MYSQL_HOST || "";
+const HOSTINGER_DB_PORT = Number(process.env.HOSTINGER_DB_PORT || process.env.MYSQL_PORT || 3306);
+const HOSTINGER_DB_USER = process.env.HOSTINGER_DB_USER || process.env.MYSQL_USER || "";
+const HOSTINGER_DB_PASSWORD = process.env.HOSTINGER_DB_PASSWORD || process.env.MYSQL_PASSWORD || "";
+const HOSTINGER_DB_NAME = process.env.HOSTINGER_DB_NAME || process.env.MYSQL_DATABASE || "";
+const HOSTINGER_TABLE = process.env.HOSTINGER_TABLE || process.env.MYSQL_TABLE || "knowledge_documents";
+const HOSTINGER_DB_SSL = String(process.env.HOSTINGER_DB_SSL || process.env.MYSQL_SSL || "").toLowerCase() === "true";
+const HAS_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_KEY);
+const HAS_HOSTINGER_DB = Boolean(HOSTINGER_DB_HOST && HOSTINGER_DB_USER && HOSTINGER_DB_NAME);
+const KNOWLEDGE_SOURCE = process.env.KNOWLEDGE_SOURCE || (HAS_SUPABASE ? "supabase" : (HAS_HOSTINGER_DB ? "hostinger" : "file"));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const gunzip = promisify(zlib.gunzip);
@@ -48,6 +58,7 @@ const STOP_WORDS = new Set([
 ]);
 
 let fileChunksPromise;
+let hostingerPool;
 
 function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9:'-]{3,}/g) || []).filter((token) => !STOP_WORDS.has(token));
@@ -65,6 +76,76 @@ async function fileExists(filePath) {
 
 function displayPath(filePath) {
   return path.relative(__dirname, filePath).replace(/\\/g, "/") || filePath;
+}
+
+function isHostingerSource() {
+  return KNOWLEDGE_SOURCE === "hostinger" || KNOWLEDGE_SOURCE === "mysql";
+}
+
+function quoteMysqlIdentifier(value, label) {
+  if (!/^[a-zA-Z0-9_]+$/.test(value)) {
+    throw new Error(`${label} may only contain letters, numbers, and underscores.`);
+  }
+  return `\`${value}\``;
+}
+
+function getHostingerTableSql() {
+  return quoteMysqlIdentifier(HOSTINGER_TABLE, "HOSTINGER_TABLE");
+}
+
+function getHostingerPool() {
+  const missing = [];
+  if (!HOSTINGER_DB_HOST) missing.push("HOSTINGER_DB_HOST");
+  if (!HOSTINGER_DB_USER) missing.push("HOSTINGER_DB_USER");
+  if (!HOSTINGER_DB_NAME) missing.push("HOSTINGER_DB_NAME");
+
+  if (missing.length) {
+    throw new Error(`${missing.join(", ")} are required when KNOWLEDGE_SOURCE=hostinger.`);
+  }
+
+  if (!hostingerPool) {
+    hostingerPool = mysql.createPool({
+      host: HOSTINGER_DB_HOST,
+      port: HOSTINGER_DB_PORT,
+      user: HOSTINGER_DB_USER,
+      password: HOSTINGER_DB_PASSWORD,
+      database: HOSTINGER_DB_NAME,
+      charset: "utf8mb4",
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0,
+      ssl: HOSTINGER_DB_SSL ? { rejectUnauthorized: false } : undefined
+    });
+  }
+
+  return hostingerPool;
+}
+
+function parseJsonValue(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return value;
+}
+
+function normalizeHostingerRecord(record, location) {
+  return normalizeKnowledgeRecord({
+    id: record.id,
+    source_type: record.source_type,
+    title: record.title,
+    content: record.content,
+    topic_tags: parseJsonValue(record.topic_tags, []),
+    references: parseJsonValue(record.references_json ?? record.references, []),
+    media: parseJsonValue(record.media_json ?? record.media, null),
+    source: record.source,
+    metadata: parseJsonValue(record.metadata_json ?? record.metadata, {}),
+    score: record.score
+  }, location);
 }
 
 function getSupabaseHeaders(extra = {}) {
@@ -201,13 +282,46 @@ async function retrieveRelevantSupabaseChunks(question) {
   return records.map((record, index) => normalizeKnowledgeRecord(record, `${SUPABASE_MATCH_FUNCTION}:${index + 1}`));
 }
 
+async function retrieveRelevantHostingerChunks(question) {
+  const limit = Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20));
+  const pool = getHostingerPool();
+  const table = getHostingerTableSql();
+  const selectColumns = "id, source_type, title, content, topic_tags, references_json, media_json, source, metadata_json";
+
+  const [rows] = await pool.execute(
+    `select ${selectColumns}, match(title, content) against (? in natural language mode) as score
+     from ${table}
+     where match(title, content) against (? in natural language mode)
+     order by score desc
+     limit ${limit}`,
+    [question, question]
+  );
+
+  if (rows.length) {
+    return rows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:${index + 1}`));
+  }
+
+  const fallbackTokens = tokenize(question).slice(0, 8);
+  if (!fallbackTokens.length) return [];
+
+  const conditions = fallbackTokens.map(() => "(lower(title) like ? or lower(content) like ?)").join(" or ");
+  const params = fallbackTokens.flatMap((token) => [`%${token.toLowerCase()}%`, `%${token.toLowerCase()}%`]);
+  const [fallbackRows] = await pool.execute(
+    `select ${selectColumns}, 0 as score from ${table} where ${conditions} limit ${limit}`,
+    params
+  );
+
+  return fallbackRows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:fallback:${index + 1}`));
+}
+
 async function retrieveContextChunks(question) {
   if (KNOWLEDGE_SOURCE === "supabase") return retrieveRelevantSupabaseChunks(question);
+  if (isHostingerSource()) return retrieveRelevantHostingerChunks(question);
   if (KNOWLEDGE_SOURCE === "file") {
     const chunks = await getFileChunks();
     return retrieveRelevantFileChunks(question, chunks);
   }
-  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file' or 'supabase'.`);
+  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file', 'supabase', or 'hostinger'.`);
 }
 
 async function checkKnowledgeStatus() {
@@ -230,6 +344,16 @@ async function checkKnowledgeStatus() {
     };
   }
 
+  if (isHostingerSource()) {
+    const [rows] = await getHostingerPool().execute(`select id from ${getHostingerTableSql()} limit 1`);
+    return {
+      corpus: `hostinger:${HOSTINGER_DB_NAME}.${HOSTINGER_TABLE}`,
+      searchMode: "mysql_fulltext",
+      recordsAvailable: rows.length > 0,
+      chunks: null
+    };
+  }
+
   if (KNOWLEDGE_SOURCE === "file") {
     const chunks = await getFileChunks();
     return {
@@ -240,7 +364,13 @@ async function checkKnowledgeStatus() {
     };
   }
 
-  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file' or 'supabase'.`);
+  throw new Error(`Unsupported KNOWLEDGE_SOURCE '${KNOWLEDGE_SOURCE}'. Use 'file', 'supabase', or 'hostinger'.`);
+}
+
+function currentCorpusDescription() {
+  if (KNOWLEDGE_SOURCE === "supabase") return `supabase:${SUPABASE_TABLE}`;
+  if (isHostingerSource()) return `hostinger:${HOSTINGER_DB_NAME || "database"}.${HOSTINGER_TABLE}`;
+  return displayPath(loadedKnowledgeCorpusFile);
 }
 
 function prettySourceType(sourceType) {
@@ -332,6 +462,10 @@ function getModelName() {
 }
 
 function getProviderHint() {
+  if (isHostingerSource()) {
+    return "Check Hostinger database credentials, remote MySQL access, and whether Render is allowed to connect to the database host.";
+  }
+
   if (MODEL_PROVIDER === "groq") {
     return "Check GROQ_API_KEY, GROQ_MODEL, and your Groq account limits.";
   }
@@ -340,7 +474,7 @@ function getProviderHint() {
     return "Check OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_MODEL, and OPENAI_COMPATIBLE_API_KEY for your cloud model provider.";
   }
 
-  return `Make sure Ollama is reachable at ${OLLAMA_BASE_URL} and the model '${OLLAMA_MODEL}' is pulled. If this app is on Render, set OLLAMA_BASE_URL to an external HTTPS model endpoint or deploy Ollama with the app.`;
+  return `Make sure Ollama is reachable at ${OLLAMA_BASE_URL} and the model '${OLLAMA_MODEL}' is pulled. If this app is on Render, set OLLAMA_BASE_URL to a public Ollama-compatible server URL or run Ollama inside the deployed service.`;
 }
 
 async function postToOllama(pathname, body) {
@@ -500,9 +634,7 @@ app.get("/health", async (req, res) => {
       provider: MODEL_PROVIDER,
       model: getModelName(),
       knowledgeSource: KNOWLEDGE_SOURCE,
-      corpus: KNOWLEDGE_SOURCE === "supabase"
-        ? `supabase:${SUPABASE_TABLE}`
-        : displayPath(loadedKnowledgeCorpusFile),
+      corpus: currentCorpusDescription(),
       error: error.message
     });
   }
