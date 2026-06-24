@@ -4,4 +4,3 @@ node_modules/
 *.log
 transcripts_raw/
 data_processed/*
-!data_processed/knowledge_corpus.jsonl.gz
