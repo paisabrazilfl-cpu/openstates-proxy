@@ -1,6 +1,6 @@
 # Transcript Ingestion
 
-This repo can pull YouTube subtitles with `yt-dlp`, convert them into transcript JSONL chunks, and then merge them into the single chatbot knowledge corpus.
+This repo can pull YouTube subtitles with `yt-dlp`, convert them into transcript JSONL chunks, and then merge them into the chatbot knowledge corpus.
 
 Only use videos and transcripts that you have permission to download and use.
 
@@ -77,20 +77,18 @@ data_processed/knowledge_corpus.jsonl
 data_processed/knowledge_corpus.jsonl.gz
 ```
 
-For a small Render-only test, the app can read `data_processed/knowledge_corpus.jsonl.gz`.
+For a large corpus, do not commit these generated files. Import the corpus into Hostinger instead.
 
-For a large corpus, use Supabase instead. Do not commit `transcripts_raw/`, `data_processed/debate_transcripts.jsonl`, or the large plain `data_processed/knowledge_corpus.jsonl` file.
+## Hostinger DB + Render
 
-## Supabase + Render
+Use Hostinger MySQL/MariaDB when the chatbot data is too large to keep in GitHub or Render memory.
 
-Use Supabase when the chatbot data is too large or changes too often to keep pushing generated files to GitHub.
-
-1. Create a Supabase project.
-2. Open the Supabase SQL editor.
+1. Create a MySQL database in Hostinger.
+2. Open phpMyAdmin or Hostinger's SQL tool.
 3. Run all SQL from:
 
 ```text
-SUPABASE_SETUP.sql
+HOSTINGER_SETUP.sql
 ```
 
 4. Build the local corpus:
@@ -99,30 +97,38 @@ SUPABASE_SETUP.sql
 npm run knowledge:refresh
 ```
 
-5. Set your local Supabase env vars:
+5. Set your local Hostinger database env vars:
 
 ```powershell
-$env:SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
-$env:SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY"
+$env:HOSTINGER_DB_HOST="YOUR_HOSTINGER_DB_HOST"
+$env:HOSTINGER_DB_PORT="3306"
+$env:HOSTINGER_DB_USER="YOUR_DB_USER"
+$env:HOSTINGER_DB_PASSWORD="YOUR_DB_PASSWORD"
+$env:HOSTINGER_DB_NAME="YOUR_DB_NAME"
 ```
 
-6. Import the corpus into Supabase:
+6. Import the corpus into Hostinger:
 
 ```powershell
-npm run knowledge:import
+npm run knowledge:import:hostinger
 ```
 
 7. In Render, set these environment variables:
 
 ```text
-KNOWLEDGE_SOURCE=supabase
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+KNOWLEDGE_SOURCE=hostinger
+HOSTINGER_DB_HOST=YOUR_HOSTINGER_DB_HOST
+HOSTINGER_DB_PORT=3306
+HOSTINGER_DB_USER=YOUR_DB_USER
+HOSTINGER_DB_PASSWORD=YOUR_DB_PASSWORD
+HOSTINGER_DB_NAME=YOUR_DB_NAME
 ```
 
-The app asks Supabase for only the top matching records per question. Render does not load the whole corpus into memory when `KNOWLEDGE_SOURCE=supabase`.
+The app asks Hostinger for only the top matching records per question. Render does not load the whole corpus into memory when `KNOWLEDGE_SOURCE=hostinger`.
 
-The service role key must stay server-side in Render. Do not put it in browser JavaScript.
+Keep the database password server-side only. Do not put it in browser JavaScript or commit it to GitHub.
+
+Important: Render must be allowed to connect to the Hostinger database remotely. If Hostinger blocks remote MySQL connections on your plan, either enable remote MySQL access in Hostinger, whitelist the needed host/IP if your plan supports it, or run the app on a Hostinger VPS instead.
 
 ## Updating The Knowledge Base Later
 
@@ -130,10 +136,10 @@ After downloading more transcripts or editing any `data/*.jsonl` file:
 
 ```powershell
 npm run knowledge:refresh
-npm run knowledge:import
+npm run knowledge:import:hostinger
 ```
 
-Then Render will use the updated Supabase data without needing to push the large corpus file to GitHub.
+Then Render will use the updated Hostinger data without needing to push the large corpus file to GitHub.
 
 ## Adding Quran, Hadith, Lectures, or Notes
 
@@ -172,8 +178,20 @@ If you do not want to use npm, run the scripts directly:
 node scripts/download-transcripts.js --channel-url "https://www.youtube.com/@CHANNEL_HANDLE/videos" --playlist-end 10
 node scripts/build-transcript-jsonl.js
 node scripts/build-knowledge-corpus.js
-node scripts/import-knowledge-to-supabase.js
+node scripts/import-knowledge-to-hostinger.js
 ```
+
+## Supabase Alternative
+
+Supabase is still supported as an alternative with:
+
+```text
+SUPABASE_SETUP.sql
+scripts/import-knowledge-to-supabase.js
+KNOWLEDGE_SOURCE=supabase
+```
+
+But for your current setup, Hostinger is the main database target.
 
 ## Useful Options
 
