@@ -62,26 +62,40 @@ async function fileExists(filePath) {
   }
 }
 
+function displayPath(filePath) {
+  return path.relative(__dirname, filePath).replace(/\\/g, "/") || filePath;
+}
+
 async function readKnowledgeCorpusFile() {
   const candidates = process.env.KNOWLEDGE_CORPUS_FILE
     ? [KNOWLEDGE_CORPUS_FILE]
     : [`${KNOWLEDGE_CORPUS_FILE}.gz`, KNOWLEDGE_CORPUS_FILE];
+  const readErrors = [];
 
   for (const candidate of candidates) {
     if (!(await fileExists(candidate))) continue;
 
-    const buffer = await fs.readFile(candidate);
-    const content = candidate.endsWith(".gz")
-      ? (await gunzip(buffer)).toString("utf8")
-      : buffer.toString("utf8");
+    try {
+      const buffer = await fs.readFile(candidate);
+      const content = candidate.endsWith(".gz")
+        ? (await gunzip(buffer)).toString("utf8")
+        : buffer.toString("utf8");
 
-    loadedKnowledgeCorpusFile = candidate;
-    return { content, filePath: candidate };
+      if (!content.trim()) {
+        throw new Error("file is empty");
+      }
+
+      loadedKnowledgeCorpusFile = candidate;
+      return { content, filePath: candidate };
+    } catch (error) {
+      readErrors.push(`${displayPath(candidate)}: ${error.message}`);
+    }
   }
 
+  const details = readErrors.length ? ` Problems: ${readErrors.join("; ")}.` : "";
   throw new Error(
-    `Knowledge corpus not found. Looked for: ${candidates.join(", ")}. ` +
-    "Run 'npm run knowledge:build' before starting the chatbot."
+    `Knowledge corpus not found or unreadable. Looked for: ${candidates.map(displayPath).join(", ")}.` +
+    `${details} Run 'npm run knowledge:build' before starting the chatbot.`
   );
 }
 
@@ -118,10 +132,10 @@ async function loadKnowledgeBaseFromFile() {
       try {
         record = JSON.parse(line);
       } catch (error) {
-        throw new Error(`${filePath}:${lineNumber} is not valid JSON: ${error.message}`);
+        throw new Error(`${displayPath(filePath)}:${lineNumber} is not valid JSON: ${error.message}`);
       }
 
-      return normalizeKnowledgeRecord(record, `${filePath}:${lineNumber}`);
+      return normalizeKnowledgeRecord(record, `${displayPath(filePath)}:${lineNumber}`);
     });
 }
 
@@ -167,7 +181,13 @@ async function loadKnowledgeBase() {
 
 async function getChunks() {
   if (!chunksPromise) chunksPromise = loadKnowledgeBase();
-  return chunksPromise;
+
+  try {
+    return await chunksPromise;
+  } catch (error) {
+    chunksPromise = null;
+    throw error;
+  }
 }
 
 function retrieveRelevantChunks(question, chunks) {
@@ -425,18 +445,32 @@ async function callModel(prompt) {
 }
 
 app.get("/health", async (req, res) => {
-  const chunks = await getChunks();
-  res.json({
-    status: "ok",
-    service: "ai-dawah-chatbot",
-    provider: MODEL_PROVIDER,
-    model: getModelName(),
-    knowledgeSource: KNOWLEDGE_SOURCE,
-    corpus: KNOWLEDGE_SOURCE === "supabase"
-      ? `supabase:${SUPABASE_TABLE}`
-      : path.relative(__dirname, loadedKnowledgeCorpusFile).replace(/\\/g, "/"),
-    chunks: chunks.length
-  });
+  try {
+    const chunks = await getChunks();
+    res.json({
+      status: "ok",
+      service: "ai-dawah-chatbot",
+      provider: MODEL_PROVIDER,
+      model: getModelName(),
+      knowledgeSource: KNOWLEDGE_SOURCE,
+      corpus: KNOWLEDGE_SOURCE === "supabase"
+        ? `supabase:${SUPABASE_TABLE}`
+        : displayPath(loadedKnowledgeCorpusFile),
+      chunks: chunks.length
+    });
+  } catch (error) {
+    res.status(503).json({
+      status: "error",
+      service: "ai-dawah-chatbot",
+      provider: MODEL_PROVIDER,
+      model: getModelName(),
+      knowledgeSource: KNOWLEDGE_SOURCE,
+      corpus: KNOWLEDGE_SOURCE === "supabase"
+        ? `supabase:${SUPABASE_TABLE}`
+        : displayPath(loadedKnowledgeCorpusFile),
+      error: error.message
+    });
+  }
 });
 
 app.post("/chat", async (req, res) => {
