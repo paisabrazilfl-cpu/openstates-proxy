@@ -79,6 +79,8 @@ data_processed/knowledge_corpus.jsonl.gz
 
 For a large corpus, do not commit these generated files. Import the corpus into Hostinger instead.
 
+The transcript builder skips duplicate subtitle files for the same YouTube video. It also skips duplicate transcript text when a video ID cannot be detected.
+
 ## Hostinger DB + Render
 
 Use Hostinger MySQL/MariaDB when the chatbot data is too large to keep in GitHub or Render memory.
@@ -130,6 +132,23 @@ Keep the database password server-side only. Do not put it in browser JavaScript
 
 Important: Render must be allowed to connect to the Hostinger database remotely. If Hostinger blocks remote MySQL connections on your plan, either enable remote MySQL access in Hostinger, whitelist the needed host/IP if your plan supports it, or run the app on a Hostinger VPS instead.
 
+## Clean Rebuild In Hostinger
+
+If phpMyAdmin shows duplicate generated rows, rebuild the local corpus and replace the generated Hostinger table:
+
+```powershell
+npm run knowledge:refresh
+npm run knowledge:import:hostinger -- --replace
+```
+
+Use `--replace` only when the table contains generated knowledge data that can be rebuilt from your local files. It clears the table before importing.
+
+The Hostinger importer skips exact duplicate records by default. To allow duplicate content intentionally, run:
+
+```powershell
+npm run knowledge:import:hostinger -- --allow-duplicate-content
+```
+
 ## Updating The Knowledge Base Later
 
 After downloading more transcripts or editing any `data/*.jsonl` file:
@@ -140,6 +159,12 @@ npm run knowledge:import:hostinger
 ```
 
 Then Render will use the updated Hostinger data without needing to push the large corpus file to GitHub.
+
+If you want to remove old generated rows that no longer exist in the rebuilt corpus, use the clean rebuild command instead:
+
+```powershell
+npm run knowledge:import:hostinger -- --replace
+```
 
 ## Adding Quran, Hadith, Lectures, or Notes
 
