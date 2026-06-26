@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
 import path from "node:path";
@@ -24,9 +25,11 @@ Usage:
   node scripts/import-knowledge-to-hostinger.js
 
 Options:
-  --input <path>       JSONL corpus file. Default: data_processed/knowledge_corpus.jsonl.
-  --batch-size <n>     Records per database upsert. Default: 100.
-  --help               Show this help.
+  --input <path>                 JSONL corpus file. Default: data_processed/knowledge_corpus.jsonl.
+  --batch-size <n>               Records per database upsert. Default: 100.
+  --replace                      Clear the target table before importing. Use only for generated knowledge data.
+  --allow-duplicate-content      Import exact duplicate records instead of skipping them.
+  --help                         Show this help.
 
 Environment:
   HOSTINGER_DB_HOST
@@ -59,6 +62,8 @@ function parseArgs(argv) {
   const options = {
     inputFile: DEFAULT_INPUT_FILE,
     batchSize: 100,
+    replace: false,
+    allowDuplicateContent: false,
     help: false
   };
 
@@ -73,6 +78,10 @@ function parseArgs(argv) {
     } else if (arg === "--batch-size") {
       options.batchSize = parsePositiveInteger(readValue(argv, i, arg), arg);
       i += 1;
+    } else if (arg === "--replace") {
+      options.replace = true;
+    } else if (arg === "--allow-duplicate-content") {
+      options.allowDuplicateContent = true;
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -97,6 +106,22 @@ function assertConfig() {
   if (missing.length) {
     throw new Error(`${missing.join(", ")} are required.`);
   }
+}
+
+function normalizeContentForFingerprint(content) {
+  return content.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function contentFingerprint(record) {
+  return crypto
+    .createHash("sha256")
+    .update([
+      record.source_type,
+      record.title,
+      record.media_json || "",
+      normalizeContentForFingerprint(record.content)
+    ].join("\n"))
+    .digest("hex");
 }
 
 function normalizeForHostinger(record) {
@@ -173,10 +198,17 @@ async function importJsonl(pool, options) {
   const stream = fs.createReadStream(options.inputFile, { encoding: "utf8" });
   const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
+  if (options.replace) {
+    await pool.execute(`truncate table ${table}`);
+    console.log(`Cleared Hostinger table '${HOSTINGER_TABLE}' before import.`);
+  }
+
+  const seenContent = new Set();
   let batch = [];
   let lineNumber = 0;
   let imported = 0;
-  let skipped = 0;
+  let skippedEmpty = 0;
+  let skippedDuplicates = 0;
 
   for await (const line of reader) {
     lineNumber += 1;
@@ -192,8 +224,17 @@ async function importJsonl(pool, options) {
 
     const normalized = normalizeForHostinger(record);
     if (!normalized) {
-      skipped += 1;
+      skippedEmpty += 1;
       continue;
+    }
+
+    if (!options.allowDuplicateContent) {
+      const fingerprint = contentFingerprint(normalized);
+      if (seenContent.has(fingerprint)) {
+        skippedDuplicates += 1;
+        continue;
+      }
+      seenContent.add(fingerprint);
     }
 
     batch.push(normalized);
@@ -211,7 +252,8 @@ async function importJsonl(pool, options) {
   }
 
   console.log(`Imported ${imported} records into Hostinger table '${HOSTINGER_TABLE}'.`);
-  if (skipped) console.log(`Skipped ${skipped} empty records.`);
+  if (skippedEmpty) console.log(`Skipped ${skippedEmpty} empty records.`);
+  if (skippedDuplicates) console.log(`Skipped ${skippedDuplicates} duplicate records.`);
 }
 
 async function main() {
