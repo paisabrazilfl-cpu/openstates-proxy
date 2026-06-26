@@ -18,7 +18,9 @@
     }
 
     main {
-      max-width: 900px;
+      display: grid;
+      gap: 18px;
+      max-width: 960px;
       margin: 0 auto;
       padding: 32px 18px;
     }
@@ -31,9 +33,15 @@
       box-shadow: 0 12px 28px rgba(23, 32, 24, 0.08);
     }
 
-    h1 {
+    h1,
+    h2 {
       margin-top: 0;
       color: #0f5132;
+    }
+
+    h2 {
+      font-size: 1.15rem;
+      margin-bottom: 12px;
     }
 
     textarea {
@@ -64,14 +72,62 @@
 
     pre {
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
       background: #f1f5ef;
       border-radius: 12px;
       padding: 16px;
       line-height: 1.5;
     }
 
-    .muted {
+    a {
+      color: #0f6840;
+      font-weight: 700;
+    }
+
+    .muted,
+    .empty,
+    .meta {
       color: #5d695d;
+    }
+
+    .video-list,
+    .debug-list {
+      display: grid;
+      gap: 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .video-item,
+    .debug-item {
+      border: 1px solid #dfe6dc;
+      border-radius: 12px;
+      padding: 14px;
+      background: #fbfcfa;
+    }
+
+    .video-title,
+    .debug-title {
+      margin: 0 0 6px;
+      font-weight: 800;
+    }
+
+    .meta {
+      margin: 0;
+      font-size: 0.92rem;
+    }
+
+    details summary {
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    .chunk-text {
+      margin: 12px 0 0;
+      max-height: 320px;
+      overflow: auto;
+      font-size: 0.92rem;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -92,7 +148,19 @@
         border-color: #3c4d3d;
       }
 
-      .muted {
+      .video-item,
+      .debug-item {
+        background: #101610;
+        border-color: #2c3b2d;
+      }
+
+      a {
+        color: #8dd8a5;
+      }
+
+      .muted,
+      .empty,
+      .meta {
         color: #b8c7b5;
       }
     }
@@ -109,15 +177,124 @@
       <h2>Answer</h2>
       <pre id="answer">Waiting for your question...</pre>
     </section>
+
+    <section class="card">
+      <h2>Related Videos</h2>
+      <div id="videos" class="empty">Ask a question to see related videos.</div>
+    </section>
+
+    <section class="card">
+      <h2>Debug</h2>
+      <div id="debug" class="empty">Ask a question to see retrieved chunks.</div>
+    </section>
   </main>
+
   <script>
     const question = document.getElementById("question");
     const ask = document.getElementById("ask");
     const answer = document.getElementById("answer");
+    const videos = document.getElementById("videos");
+    const debug = document.getElementById("debug");
+
+    function resetPanel(element, text) {
+      element.className = "empty";
+      element.replaceChildren(document.createTextNode(text));
+    }
+
+    function formatSeconds(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "";
+      const total = Math.max(0, Math.floor(Number(value)));
+      const minutes = Math.floor(total / 60);
+      const seconds = String(total % 60).padStart(2, "0");
+      return `${minutes}:${seconds}`;
+    }
+
+    function renderRelatedVideos(items = []) {
+      if (!items.length) {
+        resetPanel(videos, "No related videos found for this question.");
+        return;
+      }
+
+      const list = document.createElement("ul");
+      list.className = "video-list";
+
+      for (const item of items) {
+        const row = document.createElement("li");
+        row.className = "video-item";
+
+        const title = document.createElement("p");
+        title.className = "video-title";
+
+        const link = document.createElement("a");
+        link.href = item.url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = item.title || "Related video";
+        title.appendChild(link);
+
+        const metaParts = [];
+        if (item.channel) metaParts.push(item.channel);
+        const startTime = formatSeconds(item.start_seconds);
+        if (startTime) metaParts.push(`starts around ${startTime}`);
+
+        const meta = document.createElement("p");
+        meta.className = "meta";
+        meta.textContent = metaParts.join(" | ");
+
+        row.append(title, meta);
+        list.appendChild(row);
+      }
+
+      videos.className = "";
+      videos.replaceChildren(list);
+    }
+
+    function renderDebugChunks(chunks = []) {
+      if (!chunks.length) {
+        resetPanel(debug, "No chunks were retrieved for this question.");
+        return;
+      }
+
+      const list = document.createElement("ul");
+      list.className = "debug-list";
+
+      for (const chunk of chunks) {
+        const row = document.createElement("li");
+        row.className = "debug-item";
+
+        const details = document.createElement("details");
+        details.open = chunk.rank === 1;
+
+        const summary = document.createElement("summary");
+        const score = Number(chunk.score || 0).toFixed(3);
+        summary.textContent = `#${chunk.rank} ${chunk.title || "Untitled"} | score ${score}`;
+
+        const meta = document.createElement("p");
+        meta.className = "meta";
+        const metaParts = [chunk.sourceType || "knowledge"];
+        if (chunk.channel) metaParts.push(chunk.channel);
+        if (chunk.videoUrl) metaParts.push(chunk.videoUrl);
+        meta.textContent = metaParts.join(" | ");
+
+        const text = document.createElement("pre");
+        text.className = "chunk-text";
+        text.textContent = chunk.content || "";
+
+        details.append(summary, meta, text);
+        row.appendChild(details);
+        list.appendChild(row);
+      }
+
+      debug.className = "";
+      debug.replaceChildren(list);
+    }
 
     ask.addEventListener("click", async () => {
       ask.disabled = true;
       answer.textContent = "Thinking...";
+      resetPanel(videos, "Looking for related videos...");
+      resetPanel(debug, "Looking up chunks...");
+
       try {
         const response = await fetch("/chat", {
           method: "POST",
@@ -127,8 +304,12 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Request failed");
         answer.textContent = data.answer;
+        renderRelatedVideos(data.relatedVideos || []);
+        renderDebugChunks(data.debugChunks || []);
       } catch (error) {
         answer.textContent = `Error: ${error.message}`;
+        resetPanel(videos, "No related videos found because the request failed.");
+        resetPanel(debug, "No debug chunks found because the request failed.");
       } finally {
         ask.disabled = false;
       }
