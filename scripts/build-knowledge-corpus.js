@@ -192,7 +192,7 @@ function normalizeTranscriptRecord(record, filePath, lineNumber) {
   };
 
   return {
-    id: `debate_transcript_${rawId}_${lineNumber}`,
+    id: `debate_transcript_${slugify(rawId)}`,
     source_type: "debate_transcript",
     title: String(record.title || "Debate transcript").trim(),
     text,
