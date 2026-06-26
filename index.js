@@ -512,6 +512,21 @@ function buildRelatedVideos(contextChunks) {
   return videos.slice(0, 5);
 }
 
+function buildDebugChunks(contextChunks) {
+  return contextChunks.map((chunk, index) => ({
+    rank: index + 1,
+    id: chunk.id,
+    title: chunk.title,
+    sourceType: chunk.sourceType,
+    score: Number.isFinite(chunk.score) ? chunk.score : 0,
+    content: chunk.content.slice(0, 1400),
+    references: chunk.references,
+    videoUrl: chunk.media?.video_url || null,
+    channel: chunk.media?.channel || null,
+    startSeconds: chunk.media?.start_seconds ?? null
+  }));
+}
+
 function extractOllamaText(data) {
   return (data.message?.content || data.response || "").trim();
 }
@@ -716,7 +731,8 @@ app.post("/chat", async (req, res) => {
     res.json({
       answer,
       model: getModelName(),
-      relatedVideos: buildRelatedVideos(contextChunks)
+      relatedVideos: buildRelatedVideos(contextChunks),
+      debugChunks: buildDebugChunks(contextChunks)
     });
   } catch (error) {
     res.status(503).json({
