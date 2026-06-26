@@ -64,6 +64,46 @@ function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9:'-]{3,}/g) || []).filter((token) => !STOP_WORDS.has(token));
 }
 
+function expandSearchQuery(question) {
+  const normalized = String(question || "").toLowerCase();
+  const additions = [];
+
+  if (/\bdilema\b/.test(normalized)) {
+    additions.push("dilemma");
+  }
+
+  if (normalized.includes("islamic dilemma") || normalized.includes("islamic dilema")) {
+    additions.push(
+      "islamic dilemma",
+      "quran bible previous scriptures",
+      "torah injeel gospel",
+      "corruption preservation tahrif",
+      "christian apologetics contradiction"
+    );
+  }
+
+  if (normalized.includes("trinity")) {
+    additions.push("tawheed shirk monotheism father son holy spirit");
+  }
+
+  if (normalized.includes("crucifixion") || normalized.includes("crucified")) {
+    additions.push("isa jesus cross substitution raised allah");
+  }
+
+  return [question, ...additions].filter(Boolean).join(" ");
+}
+
+function getPrioritySearchPhrases(question) {
+  const normalized = String(question || "").toLowerCase();
+  const phrases = [];
+
+  if (normalized.includes("islamic dilemma") || normalized.includes("islamic dilema")) {
+    phrases.push("islamic dilemma", "islamic dilema");
+  }
+
+  return [...new Set(phrases)];
+}
+
 async function fileExists(filePath) {
   try {
     await fs.access(filePath);
@@ -200,18 +240,20 @@ function normalizeKnowledgeRecord(record, location) {
   }
 
   const sourceType = String(record.source_type || record.type || "knowledge");
+  const title = String(record.title || sourceType);
+
   return {
     id: String(record.id || location),
     source: String(record.source || sourceType),
     sourceType,
-    title: String(record.title || sourceType),
+    title,
     content: text,
     topicTags: Array.isArray(record.topic_tags) ? record.topic_tags : [],
     references: Array.isArray(record.references) ? record.references : [],
     media: record.media || null,
     metadata: record.metadata || {},
     score: Number(record.score || 0),
-    tokens: tokenize(text)
+    tokens: tokenize(`${title} ${text}`)
   };
 }
 
@@ -246,7 +288,8 @@ async function getFileChunks() {
 }
 
 function retrieveRelevantFileChunks(question, chunks) {
-  const questionTokens = tokenize(question);
+  const searchText = expandSearchQuery(question);
+  const questionTokens = tokenize(searchText);
   const questionSet = new Set(questionTokens);
 
   return chunks
@@ -261,11 +304,12 @@ function retrieveRelevantFileChunks(question, chunks) {
 }
 
 async function retrieveRelevantSupabaseChunks(question) {
+  const searchText = expandSearchQuery(question);
   const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${encodeURIComponent(SUPABASE_MATCH_FUNCTION)}`, {
     method: "POST",
     headers: getSupabaseHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
-      query_text: question,
+      query_text: searchText,
       match_count: Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20))
     })
   });
@@ -286,7 +330,22 @@ async function retrieveRelevantHostingerChunks(question) {
   const limit = Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20));
   const pool = getHostingerPool();
   const table = getHostingerTableSql();
+  const searchText = expandSearchQuery(question);
   const selectColumns = "id, source_type, title, content, topic_tags, references_json, media_json, source, metadata_json";
+
+  for (const phrase of getPrioritySearchPhrases(question)) {
+    const likeValue = `%${phrase}%`;
+    const [phraseRows] = await pool.execute(
+      `select ${selectColumns}, 10 as score from ${table}
+       where title like ? or content like ?
+       limit ${limit}`,
+      [likeValue, likeValue]
+    );
+
+    if (phraseRows.length) {
+      return phraseRows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:phrase:${index + 1}`));
+    }
+  }
 
   const [rows] = await pool.execute(
     `select ${selectColumns}, match(title, content) against (? in natural language mode) as score
@@ -294,14 +353,14 @@ async function retrieveRelevantHostingerChunks(question) {
      where match(title, content) against (? in natural language mode)
      order by score desc
      limit ${limit}`,
-    [question, question]
+    [searchText, searchText]
   );
 
   if (rows.length) {
     return rows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:${index + 1}`));
   }
 
-  const fallbackTokens = tokenize(question).slice(0, 8);
+  const fallbackTokens = tokenize(searchText).slice(0, 12);
   if (!fallbackTokens.length) return [];
 
   const conditions = fallbackTokens.map(() => "(lower(title) like ? or lower(content) like ?)").join(" or ");
@@ -373,25 +432,12 @@ function currentCorpusDescription() {
   return displayPath(loadedKnowledgeCorpusFile);
 }
 
-function prettySourceType(sourceType) {
-  return String(sourceType || "knowledge").replace(/_/g, " ");
-}
-
 function formatContextChunk(chunk, index) {
-  const details = [
-    `Source type: ${prettySourceType(chunk.sourceType)}`,
-    `Title: ${chunk.title}`
-  ];
+  const referenceText = chunk.references.length
+    ? `\nReference details for accuracy: ${JSON.stringify(chunk.references)}`
+    : "";
 
-  if (chunk.references.length) {
-    details.push(`References: ${JSON.stringify(chunk.references)}`);
-  }
-
-  if (chunk.media?.video_url) {
-    details.push(`Video: ${chunk.media.video_url}`);
-  }
-
-  return `[${index + 1}] ${details.join(" | ")}\n${chunk.content}`;
+  return `Argument note ${index + 1}:\n${chunk.content}${referenceText}`;
 }
 
 function buildPrompt(question, contextChunks) {
@@ -399,37 +445,51 @@ function buildPrompt(question, contextChunks) {
     .map((chunk, index) => formatContextChunk(chunk, index))
     .join("\n\n---\n\n");
 
-  return `You are a respectful Islamic educational assistant for dawah conversations.
+  return `You are a Muslim dawah debate assistant. Respond directly to the user's question or objection as if you are in a respectful live conversation.
 
 Rules:
-- Answer with adab, humility, and honesty.
+- Answer with adab, humility, confidence, and honesty.
+- Speak to the user directly. Do not sound like you are summarizing documents.
+- Use the argument notes silently. Never mention "context", "provided context", "retrieved material", "knowledge base", "transcript", "chunk", "source", or "Muslim debater".
 - Only answer questions about Islam, Christianity, religion, dawah, comparative religion, or related religious history/philosophy.
 - If the user asks about unrelated topics, politely say this chatbot is focused on Islam, Christianity, religion, and dawah, and invite them to ask a relevant question.
-- Use ONLY the provided context for religious factual claims.
-- If the context is not enough, say what is missing and suggest asking a qualified scholar or adding better sources.
+- Use ONLY the argument notes for religious factual claims.
+- If the notes are not enough, say the answer needs more precise evidence and invite the user to ask a more specific follow-up.
 - Do not invent Quran verses, hadith, Bible references, scholars, or citations.
 - Do not insult Christians, Jews, atheists, Hindus, Muslims, or any person/group.
-- If debating, summarize the concern fairly before responding.
+- If the user raises an objection, state the concern fairly in one sentence, then respond clearly.
+- For named polemical arguments like "Islamic dilemma", explain the strongest common version of the claim before answering it.
 - For fatwa, marriage/divorce, abuse, mental health, violence, or sectarian takfir topics, avoid issuing rulings and recommend qualified help.
-- Use Quran and hadith references only when they appear in the provided context.
+- Use Quran and hadith references only when they appear in the argument notes.
 - Do not show a retrieved sources section.
 - End with a short invitation for a follow-up question.
 
-Context:
-${context || "No relevant local context was found."}
+Argument notes for you only:
+${context || "No relevant argument notes were found."}
 
 User question:
 ${question}
 
-Answer directly using the context above.`;
+Direct debate-style answer:`;
+}
+
+function cleanGeneratedAnswer(answer) {
+  return answer
+    .replace(/^\s*based on (the )?(provided )?(context|material|information|notes|transcripts)[,\s:-]*/i, "")
+    .replace(/^\s*from (the )?(provided )?(context|material|information|notes|transcripts)[,\s:-]*/i, "")
+    .replace(/\bthe provided context\b/gi, "the argument")
+    .replace(/\bthe retrieved (context|material|sources?)\b/gi, "the argument")
+    .replace(/\b(in|from) (one of )?(the )?transcripts?,?\s*/gi, "")
+    .replace(/\bMuslim debaters?\s+(state|states|said|say|argue|argues|mention|mentions)\b/gi, "I would answer")
+    .trim();
 }
 
 function buildFallbackAnswer(contextChunks) {
   if (!contextChunks.length) {
-    return "I could not get a model answer, and I did not find relevant local sources. Please add more knowledge-base documents or rephrase the question.";
+    return "I could not get a model answer, and I did not find enough relevant material for this question. Try asking it more specifically or add better material for this topic.";
   }
 
-  return "I found relevant local knowledge, but the model did not return an answer. Please try again or rephrase the question.";
+  return "I found relevant material, but the model did not return an answer. Please try again or rephrase the question.";
 }
 
 function buildRelatedVideos(contextChunks) {
@@ -650,7 +710,7 @@ app.post("/chat", async (req, res) => {
 
     const contextChunks = await retrieveContextChunks(question);
     const prompt = buildPrompt(question, contextChunks);
-    const generatedAnswer = (await callModel(prompt)).trim();
+    const generatedAnswer = cleanGeneratedAnswer(await callModel(prompt));
     const answer = generatedAnswer || buildFallbackAnswer(contextChunks);
 
     res.json({
