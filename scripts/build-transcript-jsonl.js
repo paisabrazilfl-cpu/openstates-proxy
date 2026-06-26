@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -216,6 +217,35 @@ function slugify(value) {
     .slice(0, 90) || "transcript";
 }
 
+function transcriptSignature(text) {
+  return crypto
+    .createHash("sha256")
+    .update(text.toLowerCase().replace(/\s+/g, " ").trim())
+    .digest("hex");
+}
+
+function isBetterTranscriptCandidate(candidate, existing) {
+  if (candidate.wordCount !== existing.wordCount) {
+    return candidate.wordCount > existing.wordCount;
+  }
+  return candidate.file.localeCompare(existing.file) < 0;
+}
+
+function selectUniqueTranscriptCandidates(candidates) {
+  const selectedByKey = new Map();
+
+  for (const candidate of candidates) {
+    const key = candidate.videoId ? `video:${candidate.videoId}` : `text:${candidate.signature}`;
+    const existing = selectedByKey.get(key);
+
+    if (!existing || isBetterTranscriptCandidate(candidate, existing)) {
+      selectedByKey.set(key, candidate);
+    }
+  }
+
+  return [...selectedByKey.values()].sort((a, b) => a.file.localeCompare(b.file));
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -234,8 +264,8 @@ async function main() {
     throw new Error(`No transcript files found in ${options.inputDir}`);
   }
 
-  const records = [];
-  let skipped = 0;
+  const candidates = [];
+  let skippedShort = 0;
 
   for (const file of files) {
     const raw = await fs.readFile(file, "utf8");
@@ -243,24 +273,38 @@ async function main() {
     const words = text.split(/\s+/).filter(Boolean);
 
     if (words.length < options.minWords) {
-      skipped += 1;
+      skippedShort += 1;
       continue;
     }
 
     const videoId = findVideoId(file);
-    const title = readableTitle(file, videoId);
-    const relativeSource = path.relative(ROOT_DIR, file).replace(/\\/g, "/");
-    const chunks = chunkWords(text, options.chunkSize, options.chunkOverlap);
-    const sourceKey = videoId || slugify(relativeSource);
+    candidates.push({
+      file,
+      text,
+      wordCount: words.length,
+      videoId,
+      title: readableTitle(file, videoId),
+      relativeSource: path.relative(ROOT_DIR, file).replace(/\\/g, "/"),
+      signature: transcriptSignature(text)
+    });
+  }
+
+  const selected = selectUniqueTranscriptCandidates(candidates);
+  const skippedDuplicateFiles = candidates.length - selected.length;
+  const records = [];
+
+  for (const candidate of selected) {
+    const chunks = chunkWords(candidate.text, options.chunkSize, options.chunkOverlap);
+    const sourceKey = candidate.videoId || slugify(candidate.relativeSource);
 
     chunks.forEach((content, index) => {
       records.push({
         id: `${sourceKey}#${index + 1}`,
         type: "youtube_transcript",
-        source: relativeSource,
-        title,
-        videoId,
-        sourceUrl: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
+        source: candidate.relativeSource,
+        title: candidate.title,
+        videoId: candidate.videoId,
+        sourceUrl: candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : null,
         chunkIndex: index,
         chunkCount: chunks.length,
         wordCount: content.split(/\s+/).filter(Boolean).length,
@@ -276,8 +320,9 @@ async function main() {
     "utf8"
   );
 
-  console.log(`Wrote ${records.length} chunks from ${files.length - skipped} transcript files to ${options.outputFile}`);
-  if (skipped) console.log(`Skipped ${skipped} short transcript files.`);
+  console.log(`Wrote ${records.length} chunks from ${selected.length} transcript files to ${options.outputFile}`);
+  if (skippedShort) console.log(`Skipped ${skippedShort} short transcript files.`);
+  if (skippedDuplicateFiles) console.log(`Skipped ${skippedDuplicateFiles} duplicate transcript files.`);
 }
 
 main().catch((error) => {
