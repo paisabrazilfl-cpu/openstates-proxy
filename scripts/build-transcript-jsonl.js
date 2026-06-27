@@ -9,7 +9,7 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const DEFAULT_INPUT_DIR = path.join(ROOT_DIR, "transcripts_raw");
 const DEFAULT_OUTPUT_FILE = path.join(ROOT_DIR, "data_processed", "debate_transcripts.jsonl");
 const TRANSCRIPT_EXTENSIONS = new Set([".srt", ".txt", ".vtt"]);
-const TIMESTAMP_LINE = /(?:(?:\d{2}:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+(?:(?:\d{2}:)?\d{2}:\d{2}[.,]\d{3})/;
+const TIMESTAMP_LINE = /((?:\d{2}:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+(?:(?:\d{2}:)?\d{2}:\d{2}[.,]\d{3})/;
 
 function printHelp() {
   console.log(`
@@ -141,15 +141,43 @@ function cleanCaptionLine(line) {
     .trim();
 }
 
-function extractTranscriptText(raw) {
+function parseTimestampSeconds(value) {
+  const parts = String(value).replace(",", ".").split(":").map(Number);
+  if (parts.length === 3) return Math.floor((parts[0] * 3600) + (parts[1] * 60) + parts[2]);
+  if (parts.length === 2) return Math.floor((parts[0] * 60) + parts[1]);
+  return null;
+}
+
+function extractTranscriptSegments(raw) {
   const lines = raw.replace(/^\uFEFF/, "").replace(/\r/g, "").split("\n");
-  const kept = [];
+  const segments = [];
   let skippingMetadataBlock = false;
+  let currentStartSeconds = null;
+  let currentLines = [];
+  let lastText = "";
+
+  const flush = () => {
+    const text = currentLines
+      .map(cleanCaptionLine)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (text && text !== lastText) {
+      segments.push({ text, startSeconds: currentStartSeconds });
+      lastText = text;
+    }
+
+    currentLines = [];
+    currentStartSeconds = null;
+  };
 
   for (const line of lines) {
     const trimmed = line.trim();
 
     if (!trimmed) {
+      flush();
       skippingMetadataBlock = false;
       continue;
     }
@@ -159,31 +187,64 @@ function extractTranscriptText(raw) {
     }
 
     if (/^(NOTE|STYLE|REGION)\b/i.test(trimmed)) {
+      flush();
       skippingMetadataBlock = true;
       continue;
     }
 
-    if (skippingMetadataBlock || TIMESTAMP_LINE.test(trimmed) || /^\d+$/.test(trimmed)) {
+    const timestampMatch = trimmed.match(TIMESTAMP_LINE);
+    if (timestampMatch) {
+      flush();
+      skippingMetadataBlock = false;
+      currentStartSeconds = parseTimestampSeconds(timestampMatch[1]);
+      continue;
+    }
+
+    if (skippingMetadataBlock || (/^\d+$/.test(trimmed) && currentLines.length === 0)) {
       continue;
     }
 
     const cleaned = cleanCaptionLine(trimmed);
-    if (cleaned && cleaned !== kept.at(-1)) {
-      kept.push(cleaned);
+    if (cleaned && cleaned !== currentLines.at(-1)) {
+      currentLines.push(cleaned);
     }
   }
 
-  return kept.join(" ").replace(/\s+/g, " ").trim();
+  flush();
+  return segments;
 }
 
-function chunkWords(text, chunkSize, chunkOverlap) {
-  const words = text.split(/\s+/).filter(Boolean);
+function extractTranscriptText(raw) {
+  return extractTranscriptSegments(raw)
+    .map((segment) => segment.text)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function segmentWords(segments) {
+  return segments.flatMap((segment) => (
+    segment.text.split(/\s+/).filter(Boolean).map((word) => ({
+      word,
+      startSeconds: segment.startSeconds
+    }))
+  ));
+}
+
+function chunkTimedWords(words, chunkSize, chunkOverlap) {
   const chunks = [];
   const step = chunkSize - chunkOverlap;
 
   for (let start = 0; start < words.length; start += step) {
     const end = Math.min(start + chunkSize, words.length);
-    chunks.push(words.slice(start, end).join(" "));
+    const slice = words.slice(start, end);
+    const startSeconds = slice.find((entry) => Number.isFinite(entry.startSeconds))?.startSeconds ?? null;
+
+    chunks.push({
+      content: slice.map((entry) => entry.word).join(" "),
+      startSeconds
+    });
+
     if (end === words.length) break;
   }
 
@@ -269,10 +330,11 @@ async function main() {
 
   for (const file of files) {
     const raw = await fs.readFile(file, "utf8");
-    const text = extractTranscriptText(raw);
-    const words = text.split(/\s+/).filter(Boolean);
+    const segments = extractTranscriptSegments(raw);
+    const timedWords = segmentWords(segments);
+    const text = segments.map((segment) => segment.text).join(" ").replace(/\s+/g, " ").trim();
 
-    if (words.length < options.minWords) {
+    if (timedWords.length < options.minWords) {
       skippedShort += 1;
       continue;
     }
@@ -281,7 +343,8 @@ async function main() {
     candidates.push({
       file,
       text,
-      wordCount: words.length,
+      timedWords,
+      wordCount: timedWords.length,
       videoId,
       title: readableTitle(file, videoId),
       relativeSource: path.relative(ROOT_DIR, file).replace(/\\/g, "/"),
@@ -294,10 +357,12 @@ async function main() {
   const records = [];
 
   for (const candidate of selected) {
-    const chunks = chunkWords(candidate.text, options.chunkSize, options.chunkOverlap);
+    const chunks = chunkTimedWords(candidate.timedWords, options.chunkSize, options.chunkOverlap);
     const sourceKey = candidate.videoId || slugify(candidate.relativeSource);
 
-    chunks.forEach((content, index) => {
+    chunks.forEach((chunk, index) => {
+      const wordCount = chunk.content.split(/\s+/).filter(Boolean).length;
+
       records.push({
         id: `${sourceKey}#${index + 1}`,
         type: "youtube_transcript",
@@ -305,10 +370,11 @@ async function main() {
         title: candidate.title,
         videoId: candidate.videoId,
         sourceUrl: candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : null,
+        startSeconds: chunk.startSeconds,
         chunkIndex: index,
         chunkCount: chunks.length,
-        wordCount: content.split(/\s+/).filter(Boolean).length,
-        content
+        wordCount,
+        content: chunk.content
       });
     });
   }
