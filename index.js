@@ -57,11 +57,25 @@ const STOP_WORDS = new Set([
   "was", "were", "what", "when", "where", "which", "while", "who", "why", "will", "with", "would", "you", "your"
 ]);
 
+const SOURCE_TYPE_PRIORITY = new Map([
+  ["debate_card", 1000],
+  ["topic_note", 800],
+  ["quran", 700],
+  ["hadith", 700],
+  ["lecture", 500],
+  ["debate_transcript", 250]
+]);
+
 let fileChunksPromise;
 let hostingerPool;
 
 function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9:'-]{3,}/g) || []).filter((token) => !STOP_WORDS.has(token));
+}
+
+function mentionsAishaAgeTopic(normalized) {
+  return /\b(ai?sha|ayesha)\b/.test(normalized) &&
+    /(age|marry|married|marriage|nine|\b9\b|six|\b6\b|young|child|consummat|betro)/.test(normalized);
 }
 
 function expandSearchQuery(question) {
@@ -82,6 +96,18 @@ function expandSearchQuery(question) {
     );
   }
 
+  if (mentionsAishaAgeTopic(normalized)) {
+    additions.push(
+      "age of aisha",
+      "aisha six nine woman",
+      "aisha married consummated",
+      "betrothal consummation",
+      "mental physical maturity",
+      "marriage criteria standard not age",
+      "not based off six and nine"
+    );
+  }
+
   if (normalized.includes("trinity")) {
     additions.push("tawheed shirk monotheism father son holy spirit");
   }
@@ -99,6 +125,19 @@ function getPrioritySearchPhrases(question) {
 
   if (normalized.includes("islamic dilemma") || normalized.includes("islamic dilema")) {
     phrases.push("islamic dilemma", "islamic dilema");
+  }
+
+  if (mentionsAishaAgeTopic(normalized)) {
+    phrases.push(
+      "age of aisha",
+      "aisha ra",
+      "she was six and nine",
+      "not based off of six and nine",
+      "mentally and physically mature",
+      "mental and physical maturity",
+      "standard is not age",
+      "marriage criteria"
+    );
   }
 
   return [...new Set(phrases)];
@@ -257,6 +296,48 @@ function normalizeKnowledgeRecord(record, location) {
   };
 }
 
+function getSourceTypePriority(sourceType) {
+  return SOURCE_TYPE_PRIORITY.get(String(sourceType || "").toLowerCase()) || 0;
+}
+
+function duplicateChunkKey(chunk) {
+  const mediaKey = chunk.media?.video_id || chunk.media?.video_url || chunk.source || chunk.title;
+  const textKey = chunk.content.toLowerCase().replace(/\s+/g, " ").trim();
+  return `${chunk.sourceType}:${mediaKey}:${textKey}`;
+}
+
+function boostChunkScore(chunk, boost = 0) {
+  return {
+    ...chunk,
+    score: Number(chunk.score || 0) + boost + getSourceTypePriority(chunk.sourceType)
+  };
+}
+
+function mergeRankedChunks(chunks) {
+  const bestById = new Map();
+
+  for (const chunk of chunks) {
+    const existing = bestById.get(chunk.id);
+    if (!existing || chunk.score > existing.score) {
+      bestById.set(chunk.id, chunk);
+    }
+  }
+
+  const ranked = [...bestById.values()].sort((a, b) => b.score - a.score);
+  const seenContent = new Set();
+  const deduped = [];
+
+  for (const chunk of ranked) {
+    const key = duplicateChunkKey(chunk);
+    if (seenContent.has(key)) continue;
+    seenContent.add(key);
+    deduped.push(chunk);
+    if (deduped.length >= MAX_CONTEXT_CHUNKS) break;
+  }
+
+  return deduped;
+}
+
 async function loadKnowledgeBaseFromFile() {
   const { content, filePath } = await readKnowledgeCorpusFile();
 
@@ -292,15 +373,13 @@ function retrieveRelevantFileChunks(question, chunks) {
   const questionTokens = tokenize(searchText);
   const questionSet = new Set(questionTokens);
 
-  return chunks
+  return mergeRankedChunks(chunks
     .map((chunk) => {
       const overlap = chunk.tokens.filter((token) => questionSet.has(token)).length;
       const phraseBoost = questionTokens.some((token) => chunk.content.toLowerCase().includes(token)) ? 1 : 0;
-      return { ...chunk, score: overlap + phraseBoost };
+      return boostChunkScore(chunk, overlap + phraseBoost);
     })
-    .filter((chunk) => chunk.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_CONTEXT_CHUNKS);
+    .filter((chunk) => chunk.score > getSourceTypePriority(chunk.sourceType)));
 }
 
 async function retrieveRelevantSupabaseChunks(question) {
@@ -310,7 +389,7 @@ async function retrieveRelevantSupabaseChunks(question) {
     headers: getSupabaseHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       query_text: searchText,
-      match_count: Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20))
+      match_count: Math.max(1, Math.min(MAX_CONTEXT_CHUNKS * 3, 30))
     })
   });
 
@@ -323,28 +402,32 @@ async function retrieveRelevantSupabaseChunks(question) {
   }
 
   const records = await response.json();
-  return records.map((record, index) => normalizeKnowledgeRecord(record, `${SUPABASE_MATCH_FUNCTION}:${index + 1}`));
+  return mergeRankedChunks(records.map((record, index) => (
+    boostChunkScore(normalizeKnowledgeRecord(record, `${SUPABASE_MATCH_FUNCTION}:${index + 1}`))
+  )));
 }
 
 async function retrieveRelevantHostingerChunks(question) {
   const limit = Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20));
+  const searchLimit = Math.max(limit * 3, 15);
   const pool = getHostingerPool();
   const table = getHostingerTableSql();
   const searchText = expandSearchQuery(question);
   const selectColumns = "id, source_type, title, content, topic_tags, references_json, media_json, source, metadata_json";
+  const candidates = [];
 
   for (const phrase of getPrioritySearchPhrases(question)) {
     const likeValue = `%${phrase}%`;
     const [phraseRows] = await pool.execute(
-      `select ${selectColumns}, 10 as score from ${table}
+      `select ${selectColumns}, 100 as score from ${table}
        where title like ? or content like ?
-       limit ${limit}`,
+       limit ${searchLimit}`,
       [likeValue, likeValue]
     );
 
-    if (phraseRows.length) {
-      return phraseRows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:phrase:${index + 1}`));
-    }
+    candidates.push(...phraseRows.map((record, index) => (
+      boostChunkScore(normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:phrase:${index + 1}`), 100)
+    )));
   }
 
   const [rows] = await pool.execute(
@@ -352,25 +435,29 @@ async function retrieveRelevantHostingerChunks(question) {
      from ${table}
      where match(title, content) against (? in natural language mode)
      order by score desc
-     limit ${limit}`,
+     limit ${searchLimit}`,
     [searchText, searchText]
   );
 
-  if (rows.length) {
-    return rows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:${index + 1}`));
-  }
+  candidates.push(...rows.map((record, index) => (
+    boostChunkScore(normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:${index + 1}`))
+  )));
 
   const fallbackTokens = tokenize(searchText).slice(0, 12);
-  if (!fallbackTokens.length) return [];
+  if (fallbackTokens.length) {
+    const conditions = fallbackTokens.map(() => "(lower(title) like ? or lower(content) like ?)").join(" or ");
+    const params = fallbackTokens.flatMap((token) => [`%${token.toLowerCase()}%`, `%${token.toLowerCase()}%`]);
+    const [fallbackRows] = await pool.execute(
+      `select ${selectColumns}, 1 as score from ${table} where ${conditions} limit ${searchLimit}`,
+      params
+    );
 
-  const conditions = fallbackTokens.map(() => "(lower(title) like ? or lower(content) like ?)").join(" or ");
-  const params = fallbackTokens.flatMap((token) => [`%${token.toLowerCase()}%`, `%${token.toLowerCase()}%`]);
-  const [fallbackRows] = await pool.execute(
-    `select ${selectColumns}, 0 as score from ${table} where ${conditions} limit ${limit}`,
-    params
-  );
+    candidates.push(...fallbackRows.map((record, index) => (
+      boostChunkScore(normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:fallback:${index + 1}`), 1)
+    )));
+  }
 
-  return fallbackRows.map((record, index) => normalizeHostingerRecord(record, `hostinger:${HOSTINGER_TABLE}:fallback:${index + 1}`));
+  return mergeRankedChunks(candidates).slice(0, limit);
 }
 
 async function retrieveContextChunks(question) {
@@ -461,6 +548,7 @@ Rules:
 - For named polemical arguments like "Islamic dilemma", explain the strongest common version of the claim before answering it.
 - For fatwa, marriage/divorce, abuse, mental health, violence, or sectarian takfir topics, avoid issuing rulings and recommend qualified help.
 - Use Quran and hadith references only when they appear in the argument notes.
+- If the argument notes conflict, prefer the earlier/higher ranked notes.
 - Do not show a retrieved sources section.
 - End with a short invitation for a follow-up question.
 
@@ -486,7 +574,7 @@ function cleanGeneratedAnswer(answer) {
 
 function buildFallbackAnswer(contextChunks) {
   if (!contextChunks.length) {
-    return "I could not get a model answer, and I did not find enough relevant material for this question. Try asking it more specifically or add better material for this topic.";
+    return "I need better matching material in the knowledge base before I answer that confidently. Try asking with a few more keywords, or add a debate card for this topic.";
   }
 
   return "I found relevant material, but the model did not return an answer. Please try again or rephrase the question.";
@@ -724,6 +812,15 @@ app.post("/chat", async (req, res) => {
     }
 
     const contextChunks = await retrieveContextChunks(question);
+    if (!contextChunks.length) {
+      return res.json({
+        answer: buildFallbackAnswer(contextChunks),
+        model: getModelName(),
+        relatedVideos: [],
+        debugChunks: []
+      });
+    }
+
     const prompt = buildPrompt(question, contextChunks);
     const generatedAnswer = cleanGeneratedAnswer(await callModel(prompt));
     const answer = generatedAnswer || buildFallbackAnswer(contextChunks);
