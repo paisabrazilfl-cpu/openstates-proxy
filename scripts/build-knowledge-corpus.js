@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -117,6 +118,10 @@ function slugify(value) {
     .slice(0, 90) || "record";
 }
 
+function shortHash(value) {
+  return crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 12);
+}
+
 function asStringArray(value) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item).trim()).filter(Boolean);
@@ -192,7 +197,7 @@ function normalizeTranscriptRecord(record, filePath, lineNumber) {
   };
 
   return {
-    id: `debate_transcript_${slugify(rawId)}`,
+    id: `debate_transcript_${slugify(rawId)}_${shortHash(rawId)}`,
     source_type: "debate_transcript",
     title: String(record.title || "Debate transcript").trim(),
     text,
