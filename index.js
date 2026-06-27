@@ -20,9 +20,10 @@ const OPENAI_COMPATIBLE_BASE_URL = (process.env.OPENAI_COMPATIBLE_BASE_URL || ""
 const OPENAI_COMPATIBLE_API_KEY = process.env.OPENAI_COMPATIBLE_API_KEY || "";
 const OPENAI_COMPATIBLE_MODEL = process.env.OPENAI_COMPATIBLE_MODEL || "";
 const MAX_CONTEXT_CHUNKS = Number(process.env.MAX_CONTEXT_CHUNKS || 8);
+const MAX_CONTEXT_CHUNK_CHARS = Number(process.env.MAX_CONTEXT_CHUNK_CHARS || 850);
 const MAX_CHUNKS_PER_VIDEO = Number(process.env.MAX_CHUNKS_PER_VIDEO || 2);
 const MAX_RETRIEVAL_CANDIDATES = Number(process.env.MAX_RETRIEVAL_CANDIDATES || 80);
-const MAX_MODEL_TOKENS = Number(process.env.MAX_MODEL_TOKENS || 950);
+const MAX_MODEL_TOKENS = Number(process.env.MAX_MODEL_TOKENS || 650);
 const MAX_QUESTION_CHARS = Number(process.env.MAX_QUESTION_CHARS || 1200);
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -399,6 +400,40 @@ function mergeRankedChunks(chunks, limit = MAX_CONTEXT_CHUNKS) {
   return selectDiverseChunks(ranked, limit);
 }
 
+function compactWhitespace(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function trimSnippet(text, start, maxChars) {
+  const compact = compactWhitespace(text);
+  if (compact.length <= maxChars) return compact;
+
+  const safeStart = Math.max(0, Math.min(start, compact.length - maxChars));
+  const snippet = compact.slice(safeStart, safeStart + maxChars).trim();
+  return `${safeStart > 0 ? "... " : ""}${snippet}${safeStart + maxChars < compact.length ? " ..." : ""}`;
+}
+
+function buildFocusedSnippet(text, question) {
+  const compact = compactWhitespace(text);
+  if (compact.length <= MAX_CONTEXT_CHUNK_CHARS) return compact;
+
+  const lowered = compact.toLowerCase();
+  const phrases = getPrioritySearchPhrases(question).map((phrase) => phrase.toLowerCase());
+  const tokens = tokenize(expandSearchQuery(question));
+  const searchTerms = [...phrases, ...tokens].filter((term) => term.length >= 4);
+
+  let bestIndex = -1;
+  for (const term of searchTerms) {
+    const found = lowered.indexOf(term);
+    if (found !== -1 && (bestIndex === -1 || found < bestIndex)) {
+      bestIndex = found;
+    }
+  }
+
+  const start = bestIndex === -1 ? 0 : bestIndex - Math.floor(MAX_CONTEXT_CHUNK_CHARS / 3);
+  return trimSnippet(compact, start, MAX_CONTEXT_CHUNK_CHARS);
+}
+
 async function loadKnowledgeBaseFromFile() {
   const { content, filePath } = await readKnowledgeCorpusFile();
 
@@ -580,17 +615,18 @@ function currentCorpusDescription() {
   return displayPath(loadedKnowledgeCorpusFile);
 }
 
-function formatContextChunk(chunk, index) {
+function formatContextChunk(chunk, index, question) {
   const referenceText = chunk.references.length
     ? `\nReference details for accuracy: ${JSON.stringify(chunk.references)}`
     : "";
+  const snippet = buildFocusedSnippet(chunk.content, question);
 
-  return `Argument note ${index + 1}:\n${chunk.content}${referenceText}`;
+  return `Argument note ${index + 1}:\n${snippet}${referenceText}`;
 }
 
 function buildPrompt(question, contextChunks) {
   const context = contextChunks
-    .map((chunk, index) => formatContextChunk(chunk, index))
+    .map((chunk, index) => formatContextChunk(chunk, index, question))
     .join("\n\n---\n\n");
 
   return `You are a Muslim dawah debate assistant. Respond directly to the user's question or objection as if you are in a respectful live conversation.
