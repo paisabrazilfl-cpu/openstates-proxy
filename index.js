@@ -19,7 +19,10 @@ const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const OPENAI_COMPATIBLE_BASE_URL = (process.env.OPENAI_COMPATIBLE_BASE_URL || "").replace(/\/$/, "");
 const OPENAI_COMPATIBLE_API_KEY = process.env.OPENAI_COMPATIBLE_API_KEY || "";
 const OPENAI_COMPATIBLE_MODEL = process.env.OPENAI_COMPATIBLE_MODEL || "";
-const MAX_CONTEXT_CHUNKS = Number(process.env.MAX_CONTEXT_CHUNKS || 5);
+const MAX_CONTEXT_CHUNKS = Number(process.env.MAX_CONTEXT_CHUNKS || 8);
+const MAX_CHUNKS_PER_VIDEO = Number(process.env.MAX_CHUNKS_PER_VIDEO || 2);
+const MAX_RETRIEVAL_CANDIDATES = Number(process.env.MAX_RETRIEVAL_CANDIDATES || 80);
+const MAX_MODEL_TOKENS = Number(process.env.MAX_MODEL_TOKENS || 950);
 const MAX_QUESTION_CHARS = Number(process.env.MAX_QUESTION_CHARS || 1200);
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -306,6 +309,27 @@ function duplicateChunkKey(chunk) {
   return `${chunk.sourceType}:${mediaKey}:${textKey}`;
 }
 
+function getChunkVideoKey(chunk) {
+  if (chunk.media?.video_id) return `video:${chunk.media.video_id}`;
+  if (chunk.media?.video_url) return `video_url:${chunk.media.video_url}`;
+
+  const source = String(chunk.source || "");
+  const videoId = source.match(/[a-zA-Z0-9_-]{11}/)?.[0];
+  if (videoId) return `video:${videoId}`;
+
+  return `record:${chunk.source || chunk.title || chunk.id}`;
+}
+
+function getChunkChannelKey(chunk) {
+  if (chunk.media?.channel) return `channel:${String(chunk.media.channel).toLowerCase()}`;
+
+  const parts = String(chunk.source || "").split(/[\\/]+/).filter(Boolean);
+  if (parts[0] === "transcripts_raw" && parts[1]) return `channel:${parts[1].toLowerCase()}`;
+  if (parts[0]) return `source:${parts[0].toLowerCase()}`;
+
+  return getChunkVideoKey(chunk);
+}
+
 function boostChunkScore(chunk, boost = 0) {
   return {
     ...chunk,
@@ -313,7 +337,55 @@ function boostChunkScore(chunk, boost = 0) {
   };
 }
 
-function mergeRankedChunks(chunks) {
+function addDiverseChunk({ chunk, selected, selectedIds, seenContent, videoCounts, channelCounts }) {
+  if (selectedIds.has(chunk.id)) return false;
+
+  const contentKey = duplicateChunkKey(chunk);
+  if (seenContent.has(contentKey)) return false;
+
+  const videoKey = getChunkVideoKey(chunk);
+  const currentVideoCount = videoCounts.get(videoKey) || 0;
+  if (currentVideoCount >= MAX_CHUNKS_PER_VIDEO) return false;
+
+  selected.push(chunk);
+  selectedIds.add(chunk.id);
+  seenContent.add(contentKey);
+  videoCounts.set(videoKey, currentVideoCount + 1);
+
+  const channelKey = getChunkChannelKey(chunk);
+  channelCounts.set(channelKey, (channelCounts.get(channelKey) || 0) + 1);
+  return true;
+}
+
+function selectDiverseChunks(ranked, limit) {
+  const selected = [];
+  const selectedIds = new Set();
+  const seenContent = new Set();
+  const videoCounts = new Map();
+  const channelCounts = new Map();
+  const add = (chunk) => addDiverseChunk({ chunk, selected, selectedIds, seenContent, videoCounts, channelCounts });
+
+  for (const chunk of ranked) {
+    if (selected.length >= limit) break;
+    if (channelCounts.has(getChunkChannelKey(chunk))) continue;
+    add(chunk);
+  }
+
+  for (const chunk of ranked) {
+    if (selected.length >= limit) break;
+    if (videoCounts.has(getChunkVideoKey(chunk))) continue;
+    add(chunk);
+  }
+
+  for (const chunk of ranked) {
+    if (selected.length >= limit) break;
+    add(chunk);
+  }
+
+  return selected;
+}
+
+function mergeRankedChunks(chunks, limit = MAX_CONTEXT_CHUNKS) {
   const bestById = new Map();
 
   for (const chunk of chunks) {
@@ -324,18 +396,7 @@ function mergeRankedChunks(chunks) {
   }
 
   const ranked = [...bestById.values()].sort((a, b) => b.score - a.score);
-  const seenContent = new Set();
-  const deduped = [];
-
-  for (const chunk of ranked) {
-    const key = duplicateChunkKey(chunk);
-    if (seenContent.has(key)) continue;
-    seenContent.add(key);
-    deduped.push(chunk);
-    if (deduped.length >= MAX_CONTEXT_CHUNKS) break;
-  }
-
-  return deduped;
+  return selectDiverseChunks(ranked, limit);
 }
 
 async function loadKnowledgeBaseFromFile() {
@@ -389,7 +450,7 @@ async function retrieveRelevantSupabaseChunks(question) {
     headers: getSupabaseHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       query_text: searchText,
-      match_count: Math.max(1, Math.min(MAX_CONTEXT_CHUNKS * 3, 30))
+      match_count: Math.max(1, Math.min(MAX_RETRIEVAL_CANDIDATES, 100))
     })
   });
 
@@ -409,7 +470,7 @@ async function retrieveRelevantSupabaseChunks(question) {
 
 async function retrieveRelevantHostingerChunks(question) {
   const limit = Math.max(1, Math.min(MAX_CONTEXT_CHUNKS, 20));
-  const searchLimit = Math.max(limit * 3, 15);
+  const searchLimit = Math.max(limit * 8, MAX_RETRIEVAL_CANDIDATES);
   const pool = getHostingerPool();
   const table = getHostingerTableSql();
   const searchText = expandSearchQuery(question);
@@ -457,7 +518,7 @@ async function retrieveRelevantHostingerChunks(question) {
     )));
   }
 
-  return mergeRankedChunks(candidates).slice(0, limit);
+  return mergeRankedChunks(candidates, limit);
 }
 
 async function retrieveContextChunks(question) {
@@ -549,6 +610,7 @@ Rules:
 - For fatwa, marriage/divorce, abuse, mental health, violence, or sectarian takfir topics, avoid issuing rulings and recommend qualified help.
 - Use Quran and hadith references only when they appear in the argument notes.
 - If the argument notes conflict, prefer the earlier/higher ranked notes.
+- When several notes give different useful arguments on the same topic, combine the distinct arguments into one organized answer instead of relying on only the first note.
 - Do not show a retrieved sources section.
 - End with a short invitation for a follow-up question.
 
@@ -690,7 +752,7 @@ async function callChatCompletions({ baseUrl, apiKey, model, prompt, providerNam
         model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.2,
-        max_tokens: 700
+        max_tokens: MAX_MODEL_TOKENS
       })
     });
   } catch (error) {
@@ -748,7 +810,7 @@ Write the final answer now. Do not return an empty response.` }],
     stream: false,
     options: {
       temperature: 0.2,
-      num_predict: 700
+      num_predict: MAX_MODEL_TOKENS
     }
   });
 
@@ -765,7 +827,7 @@ Write the final answer now. Do not return an empty response.`,
     stream: false,
     options: {
       temperature: 0.2,
-      num_predict: 700
+      num_predict: MAX_MODEL_TOKENS
     }
   });
 
