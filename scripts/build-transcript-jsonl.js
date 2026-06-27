@@ -284,6 +284,10 @@ function slugify(value) {
     .slice(0, 90) || "transcript";
 }
 
+function shortHash(value) {
+  return crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 12);
+}
+
 function transcriptSignature(text) {
   return crypto
     .createHash("sha256")
@@ -325,7 +329,7 @@ async function writeSelectedTranscripts(selected, options) {
       const segments = extractTranscriptSegments(raw);
       const timedWords = segmentWords(segments);
       const chunks = chunkTimedWords(timedWords, options.chunkSize, options.chunkOverlap);
-      const sourceKey = candidate.videoId || slugify(candidate.relativeSource);
+      const sourceKey = candidate.videoId || `${shortHash(candidate.relativeSource)}-${slugify(candidate.relativeSource)}`;
 
       for (let index = 0; index < chunks.length; index += 1) {
         const chunk = chunks[index];
