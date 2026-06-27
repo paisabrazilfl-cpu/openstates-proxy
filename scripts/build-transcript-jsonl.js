@@ -222,6 +222,12 @@ function extractTranscriptText(raw) {
     .trim();
 }
 
+function countSegmentWords(segments) {
+  return segments.reduce((total, segment) => {
+    return total + segment.text.split(/\s+/).filter(Boolean).length;
+  }, 0);
+}
+
 function segmentWords(segments) {
   return segments.flatMap((segment) => (
     segment.text.split(/\s+/).filter(Boolean).map((word) => ({
@@ -307,6 +313,52 @@ function selectUniqueTranscriptCandidates(candidates) {
   return [...selectedByKey.values()].sort((a, b) => a.file.localeCompare(b.file));
 }
 
+async function writeSelectedTranscripts(selected, options) {
+  await fs.mkdir(path.dirname(options.outputFile), { recursive: true });
+  const tempOutputFile = `${options.outputFile}.tmp`;
+  const output = await fs.open(tempOutputFile, "w");
+  let recordCount = 0;
+
+  try {
+    for (const candidate of selected) {
+      const raw = await fs.readFile(candidate.file, "utf8");
+      const segments = extractTranscriptSegments(raw);
+      const timedWords = segmentWords(segments);
+      const chunks = chunkTimedWords(timedWords, options.chunkSize, options.chunkOverlap);
+      const sourceKey = candidate.videoId || slugify(candidate.relativeSource);
+
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        const wordCount = chunk.content.split(/\s+/).filter(Boolean).length;
+        const record = {
+          id: `${sourceKey}#${index + 1}`,
+          type: "youtube_transcript",
+          source: candidate.relativeSource,
+          title: candidate.title,
+          videoId: candidate.videoId,
+          sourceUrl: candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : null,
+          startSeconds: chunk.startSeconds,
+          chunkIndex: index,
+          chunkCount: chunks.length,
+          wordCount,
+          content: chunk.content
+        };
+
+        await output.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+        recordCount += 1;
+      }
+    }
+  } catch (error) {
+    await output.close().catch(() => {});
+    await fs.rm(tempOutputFile, { force: true }).catch(() => {});
+    throw error;
+  }
+
+  await output.close();
+  await fs.rename(tempOutputFile, options.outputFile);
+  return recordCount;
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -331,10 +383,10 @@ async function main() {
   for (const file of files) {
     const raw = await fs.readFile(file, "utf8");
     const segments = extractTranscriptSegments(raw);
-    const timedWords = segmentWords(segments);
     const text = segments.map((segment) => segment.text).join(" ").replace(/\s+/g, " ").trim();
+    const wordCount = countSegmentWords(segments);
 
-    if (timedWords.length < options.minWords) {
+    if (wordCount < options.minWords) {
       skippedShort += 1;
       continue;
     }
@@ -342,9 +394,7 @@ async function main() {
     const videoId = findVideoId(file);
     candidates.push({
       file,
-      text,
-      timedWords,
-      wordCount: timedWords.length,
+      wordCount,
       videoId,
       title: readableTitle(file, videoId),
       relativeSource: path.relative(ROOT_DIR, file).replace(/\\/g, "/"),
@@ -354,39 +404,9 @@ async function main() {
 
   const selected = selectUniqueTranscriptCandidates(candidates);
   const skippedDuplicateFiles = candidates.length - selected.length;
-  const records = [];
+  const recordCount = await writeSelectedTranscripts(selected, options);
 
-  for (const candidate of selected) {
-    const chunks = chunkTimedWords(candidate.timedWords, options.chunkSize, options.chunkOverlap);
-    const sourceKey = candidate.videoId || slugify(candidate.relativeSource);
-
-    chunks.forEach((chunk, index) => {
-      const wordCount = chunk.content.split(/\s+/).filter(Boolean).length;
-
-      records.push({
-        id: `${sourceKey}#${index + 1}`,
-        type: "youtube_transcript",
-        source: candidate.relativeSource,
-        title: candidate.title,
-        videoId: candidate.videoId,
-        sourceUrl: candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : null,
-        startSeconds: chunk.startSeconds,
-        chunkIndex: index,
-        chunkCount: chunks.length,
-        wordCount,
-        content: chunk.content
-      });
-    });
-  }
-
-  await fs.mkdir(path.dirname(options.outputFile), { recursive: true });
-  await fs.writeFile(
-    options.outputFile,
-    records.map((record) => JSON.stringify(record)).join("\n") + "\n",
-    "utf8"
-  );
-
-  console.log(`Wrote ${records.length} chunks from ${selected.length} transcript files to ${options.outputFile}`);
+  console.log(`Wrote ${recordCount} chunks from ${selected.length} transcript files to ${options.outputFile}`);
   if (skippedShort) console.log(`Skipped ${skippedShort} short transcript files.`);
   if (skippedDuplicateFiles) console.log(`Skipped ${skippedDuplicateFiles} duplicate transcript files.`);
 }
