@@ -209,6 +209,22 @@
       return `${minutes}:${seconds}`;
     }
 
+    function videoUrlAtTime(url, startSeconds) {
+      if (!url || startSeconds === null || startSeconds === undefined || Number.isNaN(Number(startSeconds))) {
+        return url;
+      }
+
+      const seconds = Math.max(0, Math.floor(Number(startSeconds)));
+      try {
+        const parsed = new URL(url);
+        parsed.searchParams.set("t", `${seconds}s`);
+        return parsed.toString();
+      } catch {
+        const separator = url.includes("?") ? "&" : "?";
+        return `${url}${separator}t=${seconds}s`;
+      }
+    }
+
     function renderRelatedVideos(items = []) {
       if (!items.length) {
         resetPanel(videos, "No related videos found for this question.");
@@ -226,7 +242,7 @@
         title.className = "video-title";
 
         const link = document.createElement("a");
-        link.href = item.url;
+        link.href = videoUrlAtTime(item.url, item.start_seconds);
         link.target = "_blank";
         link.rel = "noreferrer";
         link.textContent = item.title || "Related video";
